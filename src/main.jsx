@@ -6,26 +6,50 @@ import {
   CameraOff,
   Clapperboard,
   Copy,
+  Expand,
+  FileVideo,
   Link,
+  Maximize2,
   MessageCircle,
   Mic,
   MicOff,
   MonitorUp,
   Pause,
   Play,
+  Radio,
+  RotateCcw,
   Send,
   Sparkles,
+  Subtitles,
   Upload,
-  Users
+  Users,
+  Volume2,
+  Wand2
 } from "lucide-react";
 import "./styles.css";
 
 const socket = io("http://localhost:3001", { autoConnect: true });
-const reactions = ["🔥", "😂", "😱", "😭", "👏", "🍿"];
+const reactions = ["🔥", "😂", "😱", "😭", "👏", "🍿", "🤯", "❤️"];
+const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
 function syncTime(playback) {
   if (playback.paused) return playback.currentTime;
   return playback.currentTime + (Date.now() - playback.updatedAt) / 1000;
+}
+
+function VideoTile({ stream, name, muted = false }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (ref.current) ref.current.srcObject = stream;
+  }, [stream]);
+
+  return (
+    <div className="video-tile">
+      <video ref={ref} autoPlay playsInline muted={muted} />
+      <span>{name}</span>
+    </div>
+  );
 }
 
 function App() {
@@ -35,15 +59,36 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState("");
   const [localUrl, setLocalUrl] = useState("");
+  const [movieSource, setMovieSource] = useState(null);
+  const [remoteMovieStream, setRemoteMovieStream] = useState(null);
   const [screenStream, setScreenStream] = useState(null);
+  const [localMediaStream, setLocalMediaStream] = useState(null);
+  const [remoteMedia, setRemoteMedia] = useState({});
   const [floating, setFloating] = useState([]);
-  const [device, setDevice] = useState({ audio: true, video: false });
+  const [device, setDevice] = useState({ audio: false, video: false });
+  const [theaterMode, setTheaterMode] = useState(false);
   const videoRef = useRef(null);
-  const screenRef = useRef(null);
+  const remoteMovieRef = useRef(null);
+  const theaterRef = useRef(null);
   const syncing = useRef(false);
+  const peerConnections = useRef(new Map());
+  const pendingIce = useRef(new Map());
+  const movieStreamRef = useRef(null);
+  const localMediaRef = useRef(null);
+  const roomRef = useRef(null);
 
   const isHost = room?.hostId === socket.id;
   const invite = room ? `${window.location.origin}?room=${room.code}` : "";
+  const people = useMemo(() => room?.people || [], [room]);
+  const remoteMediaList = Object.entries(remoteMedia).map(([peerId, stream]) => ({
+    peerId,
+    stream,
+    name: people.find((person) => person.id === peerId)?.name || "Friend"
+  }));
+
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -52,13 +97,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    socket.on("room:update", setRoom);
+    socket.on("room:update", (snapshot) => {
+      setRoom(snapshot);
+      reconcilePeers(snapshot);
+    });
     socket.on("chat:new", (next) => setMessages((current) => [...current, next]));
     socket.on("reaction:new", (next) => {
       setFloating((current) => [...current, next]);
       window.setTimeout(() => {
         setFloating((current) => current.filter((item) => item.id !== next.id));
-      }, 2200);
+      }, 2400);
     });
     socket.on("playback:sync", (playback) => {
       const player = videoRef.current;
@@ -72,21 +120,26 @@ function App() {
         syncing.current = false;
       }, 250);
     });
+    socket.on("webrtc:offer", handleOffer);
+    socket.on("webrtc:answer", handleAnswer);
+    socket.on("webrtc:ice", handleIce);
     return () => {
       socket.off("room:update");
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
+      socket.off("webrtc:offer");
+      socket.off("webrtc:answer");
+      socket.off("webrtc:ice");
+      closeAllPeers();
     };
   }, []);
 
   useEffect(() => {
-    if (screenRef.current && screenStream) {
-      screenRef.current.srcObject = screenStream;
-    }
-  }, [screenStream]);
-
-  const people = useMemo(() => room?.people || [], [room]);
+    if (!remoteMovieRef.current) return;
+    remoteMovieRef.current.srcObject = remoteMovieStream;
+    if (remoteMovieStream) remoteMovieRef.current.play().catch(() => {});
+  }, [remoteMovieStream]);
 
   function rememberName() {
     const clean = name.trim() || "Movie Buddy";
@@ -95,13 +148,19 @@ function App() {
   }
 
   function createRoom() {
-    socket.emit("room:create", { name: rememberName() }, (snapshot) => setRoom(snapshot));
+    socket.emit("room:create", { name: rememberName() }, (snapshot) => {
+      setRoom(snapshot);
+      reconcilePeers(snapshot);
+    });
   }
 
   function joinRoom() {
     socket.emit("room:join", { roomCode: joinCode, name: rememberName() }, (snapshot) => {
       if (snapshot?.error) alert(snapshot.error);
-      else setRoom(snapshot);
+      else {
+        setRoom(snapshot);
+        reconcilePeers(snapshot);
+      }
     });
   }
 
@@ -118,12 +177,187 @@ function App() {
     });
   }
 
-  function chooseFile(event) {
+  function emitSignal(event, peerId, channel, payload) {
+    const activeRoom = roomRef.current;
+    if (!activeRoom) return;
+    socket.emit(event, {
+      roomCode: activeRoom.code,
+      to: peerId,
+      channel,
+      ...payload
+    });
+  }
+
+  function peerKey(channel, peerId) {
+    return `${channel}:${peerId}`;
+  }
+
+  function closePeer(channel, peerId) {
+    const key = peerKey(channel, peerId);
+    peerConnections.current.get(key)?.close();
+    peerConnections.current.delete(key);
+    pendingIce.current.delete(key);
+  }
+
+  function closeAllPeers() {
+    for (const pc of peerConnections.current.values()) pc.close();
+    peerConnections.current.clear();
+    pendingIce.current.clear();
+  }
+
+  function createPeer(channel, peerId) {
+    const key = peerKey(channel, peerId);
+    const existing = peerConnections.current.get(key);
+    if (existing && existing.connectionState !== "closed") return existing;
+
+    const pc = new RTCPeerConnection(rtcConfig);
+    peerConnections.current.set(key, pc);
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) emitSignal("webrtc:ice", peerId, channel, { candidate: event.candidate });
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (!["failed", "disconnected", "closed"].includes(pc.connectionState)) return;
+      if (channel === "movie") setRemoteMovieStream(null);
+      if (channel === "call") {
+        setRemoteMedia((current) => {
+          const next = { ...current };
+          delete next[peerId];
+          return next;
+        });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      const [stream] = event.streams;
+      if (!stream) return;
+      if (channel === "movie") setRemoteMovieStream(stream);
+      if (channel === "call") setRemoteMedia((current) => ({ ...current, [peerId]: stream }));
+    };
+
+    if (channel === "call" && localMediaRef.current) {
+      localMediaRef.current.getTracks().forEach((track) => pc.addTrack(track, localMediaRef.current));
+    }
+
+    if (channel === "movie" && roomRef.current?.hostId === socket.id && movieStreamRef.current) {
+      movieStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, movieStreamRef.current));
+    }
+
+    return pc;
+  }
+
+  async function makeOffer(channel, peerId) {
+    const pc = createPeer(channel, peerId);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    emitSignal("webrtc:offer", peerId, channel, { description: pc.localDescription });
+  }
+
+  async function handleOffer({ from, channel, description }) {
+    const pc = createPeer(channel, from);
+    await pc.setRemoteDescription(description);
+    await flushIce(channel, from);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    emitSignal("webrtc:answer", from, channel, { description: pc.localDescription });
+  }
+
+  async function handleAnswer({ from, channel, description }) {
+    const pc = peerConnections.current.get(peerKey(channel, from));
+    if (!pc) return;
+    await pc.setRemoteDescription(description);
+    await flushIce(channel, from);
+  }
+
+  async function handleIce({ from, channel, candidate }) {
+    const key = peerKey(channel, from);
+    const pc = peerConnections.current.get(key);
+    if (!pc?.remoteDescription) {
+      pendingIce.current.set(key, [...(pendingIce.current.get(key) || []), candidate]);
+      return;
+    }
+    await pc.addIceCandidate(candidate).catch(() => {});
+  }
+
+  async function flushIce(channel, peerId) {
+    const key = peerKey(channel, peerId);
+    const pc = peerConnections.current.get(key);
+    const queued = pendingIce.current.get(key) || [];
+    pendingIce.current.delete(key);
+    for (const candidate of queued) await pc.addIceCandidate(candidate).catch(() => {});
+  }
+
+  function reconcilePeers(snapshot) {
+    if (!snapshot) return;
+    const others = snapshot.people.filter((person) => person.id !== socket.id);
+    const liveIds = new Set(others.map((person) => person.id));
+
+    for (const key of peerConnections.current.keys()) {
+      const [channel, peerId] = key.split(":");
+      if (!liveIds.has(peerId)) closePeer(channel, peerId);
+    }
+
+    for (const person of others) {
+      if (socket.id < person.id) makeOffer("call", person.id).catch(() => {});
+      if (snapshot.hostId === socket.id && movieStreamRef.current) {
+        makeOffer("movie", person.id).catch(() => {});
+      }
+    }
+  }
+
+  function restartMovieBroadcast() {
+    const activeRoom = roomRef.current;
+    if (!activeRoom) return;
+    for (const key of [...peerConnections.current.keys()]) {
+      if (key.startsWith("movie:")) closePeer("movie", key.slice("movie:".length));
+    }
+    activeRoom.people
+      .filter((person) => person.id !== socket.id)
+      .forEach((person) => makeOffer("movie", person.id).catch(() => {}));
+  }
+
+  function restartCallLayer() {
+    const activeRoom = roomRef.current;
+    if (!activeRoom) return;
+    for (const key of [...peerConnections.current.keys()]) {
+      if (key.startsWith("call:")) closePeer("call", key.slice("call:".length));
+    }
+    activeRoom.people
+      .filter((person) => person.id !== socket.id && socket.id < person.id)
+      .forEach((person) => makeOffer("call", person.id).catch(() => {}));
+  }
+
+  async function startLocalMedia(nextDevice = device) {
+    if (!nextDevice.audio && !nextDevice.video) {
+      localMediaRef.current?.getTracks().forEach((track) => track.stop());
+      setLocalMediaStream(null);
+      localMediaRef.current = null;
+      restartCallLayer();
+      return;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: nextDevice.audio,
+      video: nextDevice.video
+        ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
+        : false
+    });
+    localMediaRef.current?.getTracks().forEach((track) => track.stop());
+    localMediaRef.current = stream;
+    setLocalMediaStream(stream);
+    restartCallLayer();
+  }
+
+  async function chooseFile(event) {
     const file = event.target.files?.[0];
     if (!file) return;
     if (localUrl) URL.revokeObjectURL(localUrl);
     const nextUrl = URL.createObjectURL(file);
     setLocalUrl(nextUrl);
+    setMovieSource("file");
+    setRemoteMovieStream(null);
+    setScreenStream(null);
     socket.emit("playback:update", {
       roomCode: room.code,
       playback: {
@@ -134,11 +368,30 @@ function App() {
     });
   }
 
+  function captureMovieStream() {
+    const player = videoRef.current;
+    if (!player) return;
+    const stream = player.captureStream?.() || player.mozCaptureStream?.();
+    if (!stream) {
+      alert("This browser cannot broadcast video elements. Try Chrome or use screen share.");
+      return;
+    }
+    movieStreamRef.current = stream;
+    restartMovieBroadcast();
+  }
+
   async function shareScreen() {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       setScreenStream(stream);
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => setScreenStream(null));
+      setMovieSource("screen");
+      movieStreamRef.current = stream;
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+        setScreenStream(null);
+        movieStreamRef.current = videoRef.current?.captureStream?.() || null;
+        restartMovieBroadcast();
+      });
+      restartMovieBroadcast();
     } catch {
       alert("Screen share was cancelled or blocked by the browser.");
     }
@@ -150,10 +403,33 @@ function App() {
     setMessage("");
   }
 
-  function toggleDevice(key) {
+  async function toggleDevice(key) {
     const next = { ...device, [key]: !device[key] };
-    setDevice(next);
-    socket.emit("presence:update", { roomCode: room.code, patch: next });
+    try {
+      setDevice(next);
+      await startLocalMedia(next);
+      socket.emit("presence:update", { roomCode: room.code, patch: next });
+    } catch {
+      alert(`${key === "audio" ? "Microphone" : "Camera"} permission was blocked.`);
+      setDevice(device);
+    }
+  }
+
+  async function toggleFullscreen() {
+    if (!document.fullscreenElement) {
+      await theaterRef.current?.requestFullscreen();
+      setTheaterMode(true);
+    } else {
+      await document.exitFullscreen();
+      setTheaterMode(false);
+    }
+  }
+
+  function jump(seconds) {
+    const player = videoRef.current;
+    if (!player) return;
+    player.currentTime = Math.max(0, player.currentTime + seconds);
+    publishPlayback();
   }
 
   if (!room) {
@@ -164,10 +440,10 @@ function App() {
             <Clapperboard size={28} />
             <span>Cinemate</span>
           </div>
-          <h1>Movie night, synced like everyone is on the same couch.</h1>
+          <h1>Movie night, streamed and synced from one host.</h1>
           <p>
-            Create a room, share the code, load the same local movie file, and keep playback,
-            reactions, chat, voice, and video in one sharp little cinema.
+            Host a room, load a movie, broadcast it live, keep everyone on the same timestamp,
+            and throw chat, reactions, voice, and camera into one wild little cinema.
           </p>
         </section>
 
@@ -196,7 +472,7 @@ function App() {
   }
 
   return (
-    <main className="app">
+    <main className={`app ${theaterMode ? "cinema-focus" : ""}`}>
       <header className="topbar">
         <div>
           <div className="brand compact">
@@ -214,26 +490,53 @@ function App() {
       </header>
 
       <section className="stage">
-        <div className="theater">
-          {screenStream ? (
-            <video ref={screenRef} autoPlay playsInline className="movie" />
-          ) : localUrl ? (
+        <div className="theater" ref={theaterRef}>
+          {isHost && screenStream ? (
+            <video
+              autoPlay
+              playsInline
+              muted
+              className="movie"
+              ref={(node) => {
+                if (node) node.srcObject = screenStream;
+              }}
+            />
+          ) : isHost && localUrl ? (
             <video
               ref={videoRef}
               className="movie"
               src={localUrl}
               controls
+              onLoadedMetadata={captureMovieStream}
               onPlay={() => publishPlayback({ paused: false })}
               onPause={() => publishPlayback({ paused: true })}
               onSeeked={() => publishPlayback()}
             />
+          ) : remoteMovieStream ? (
+            <video ref={remoteMovieRef} className="movie" autoPlay playsInline controls />
           ) : (
             <div className="empty">
-              <Upload size={42} />
-              <h2>Load the movie locally</h2>
-              <p>For best quality, everyone should select their own copy of the same file.</p>
+              <Radio size={46} />
+              <h2>{isHost ? "Choose a movie or share screen" : "Waiting for the host stream"}</h2>
+              <p>
+                {isHost
+                  ? "Once selected, the movie is broadcast live to everyone in the room."
+                  : "Keep this tab open. The host broadcast will appear here automatically."}
+              </p>
             </div>
           )}
+
+          <div className="hud">
+            <button onClick={() => jump(-10)} title="Back 10 seconds">
+              <RotateCcw size={18} />
+            </button>
+            <button onClick={toggleFullscreen} title="Fullscreen">
+              <Expand size={18} />
+            </button>
+            <button onClick={() => socket.emit("reaction:send", { roomCode: room.code, reaction: "🍿" })}>
+              <Wand2 size={18} />
+            </button>
+          </div>
 
           <div className="float-layer">
             {floating.map((item) => (
@@ -243,35 +546,46 @@ function App() {
         </div>
 
         <aside className="side">
-          <div className="toolbar">
-            <label className="file-button">
-              <Upload size={18} />
-              Movie
-              <input type="file" accept="video/*,.mkv" onChange={chooseFile} />
-            </label>
-            <button onClick={shareScreen} title="Share screen with audio">
+          <div className={`toolbar ${isHost ? "" : "viewer-tools"}`}>
+            {isHost && (
+              <label className={`file-button ${localUrl ? "loaded" : ""}`}>
+                {localUrl ? <FileVideo size={18} /> : <Upload size={18} />}
+                {localUrl ? "Change Movie" : "Broadcast Movie"}
+                <input type="file" accept="video/*,.mkv" onChange={chooseFile} />
+              </label>
+            )}
+            <button className={movieSource === "screen" ? "active" : ""} onClick={shareScreen} title="Share screen with audio">
               <MonitorUp size={18} />
             </button>
-            <button onClick={() => toggleDevice("audio")} title="Toggle mic">
+            <button className={device.audio ? "active" : ""} onClick={() => toggleDevice("audio")} title="Toggle mic">
               {device.audio ? <Mic size={18} /> : <MicOff size={18} />}
             </button>
-            <button onClick={() => toggleDevice("video")} title="Toggle camera">
+            <button className={device.video ? "active" : ""} onClick={() => toggleDevice("video")} title="Toggle camera">
               {device.video ? <Camera size={18} /> : <CameraOff size={18} />}
+            </button>
+            <button onClick={toggleFullscreen} title="Fullscreen">
+              <Maximize2 size={18} />
             </button>
           </div>
 
           <div className="sync-card">
-            <h3>Sync Control</h3>
+            <h3><Volume2 size={18} /> Watch Control</h3>
             <div className="sync-buttons">
-              <button onClick={() => videoRef.current?.play()}>
+              <button onClick={() => videoRef.current?.play()} disabled={!isHost}>
                 <Play size={18} />
               </button>
-              <button onClick={() => videoRef.current?.pause()}>
+              <button onClick={() => videoRef.current?.pause()} disabled={!isHost}>
                 <Pause size={18} />
               </button>
-              <button onClick={() => publishPlayback()}>Resync</button>
+              <button onClick={() => publishPlayback()} disabled={!isHost}>Resync</button>
             </div>
-            <p>{isHost ? "You are hosting this room." : "Playback follows the room host."}</p>
+            <p>{isHost ? "You are broadcasting the room stream." : "You are watching the host broadcast."}</p>
+          </div>
+
+          <div className="watch-stats">
+            <div><strong>{people.length}</strong><span>inside</span></div>
+            <div><strong>{remoteMovieStream || isHost ? "Live" : "Idle"}</strong><span>stream</span></div>
+            <div><strong>{movieSource === "screen" ? "Screen" : "Movie"}</strong><span>source</span></div>
           </div>
 
           <div className="people">
@@ -287,6 +601,13 @@ function App() {
             ))}
           </div>
 
+          <div className="call-grid">
+            {localMediaStream && <VideoTile stream={localMediaStream} name="You" muted />}
+            {remoteMediaList.map((item) => (
+              <VideoTile key={item.peerId} stream={item.stream} name={item.name} />
+            ))}
+          </div>
+
           <div className="reactions">
             {reactions.map((reaction) => (
               <button
@@ -297,6 +618,11 @@ function App() {
               </button>
             ))}
           </div>
+
+          <button className="subtitle-button">
+            <Subtitles size={18} />
+            Subtitles soon
+          </button>
         </aside>
       </section>
 

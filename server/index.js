@@ -126,6 +126,33 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("webrtc:offer", ({ roomCode, to, channel, description }) => {
+    if (!rooms.has(roomCode) || !to) return;
+    io.to(to).emit("webrtc:offer", {
+      from: socket.id,
+      channel,
+      description
+    });
+  });
+
+  socket.on("webrtc:answer", ({ roomCode, to, channel, description }) => {
+    if (!rooms.has(roomCode) || !to) return;
+    io.to(to).emit("webrtc:answer", {
+      from: socket.id,
+      channel,
+      description
+    });
+  });
+
+  socket.on("webrtc:ice", ({ roomCode, to, channel, candidate }) => {
+    if (!rooms.has(roomCode) || !to || !candidate) return;
+    io.to(to).emit("webrtc:ice", {
+      from: socket.id,
+      channel,
+      candidate
+    });
+  });
+
   socket.on("disconnect", () => {
     for (const [roomCode, room] of rooms) {
       if (!room.people.has(socket.id)) continue;
