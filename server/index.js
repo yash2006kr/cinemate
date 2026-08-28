@@ -1,17 +1,66 @@
 import express from "express";
+import multer from "multer";
 import { createServer } from "node:http";
+import { existsSync, mkdirSync } from "node:fs";
+import { extname, join } from "node:path";
 import { Server } from "socket.io";
 
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", "http://127.0.0.1:5173"],
+    origin: true,
     methods: ["GET", "POST"]
   }
 });
 
 const rooms = new Map();
+const uploadsDir = join(process.cwd(), "uploads");
+
+if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: uploadsDir,
+  filename: (req, file, done) => {
+    const roomCode = String(req.params.roomCode || "room").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const extension = extname(file.originalname) || ".mp4";
+    done(null, `${roomCode}-${Date.now()}${extension}`);
+  }
+});
+const upload = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 * 1024 }
+});
+
+app.use("/uploads", express.static(uploadsDir, {
+  acceptRanges: true,
+  immutable: false,
+  maxAge: 0
+}));
+
+app.post("/api/rooms/:roomCode/movie", upload.single("movie"), (req, res) => {
+  const roomCode = String(req.params.roomCode || "").trim().toUpperCase();
+  const room = rooms.get(roomCode);
+  if (!room || !req.file) {
+    res.status(404).json({ error: "Room or movie file not found" });
+    return;
+  }
+
+  const mediaUrl = `/uploads/${req.file.filename}`;
+  room.playback = {
+    ...room.playback,
+    paused: true,
+    currentTime: 0,
+    updatedAt: Date.now(),
+    title: req.file.originalname,
+    mediaUrl,
+    source: "upload"
+  };
+
+  io.to(roomCode).emit("movie:ready", room.playback);
+  io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+  res.json(room.playback);
+});
 
 function code() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -37,7 +86,9 @@ function ensureRoom(roomCode, hostId) {
         paused: true,
         currentTime: 0,
         updatedAt: Date.now(),
-        title: "No movie selected"
+        title: "No movie selected",
+        mediaUrl: null,
+        source: null
       }
     });
   }

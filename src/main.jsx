@@ -28,7 +28,8 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const socket = io("http://localhost:3001", { autoConnect: true });
+const serverUrl = `${window.location.protocol}//${window.location.hostname}:3001`;
+const socket = io(serverUrl, { autoConnect: true });
 const reactions = ["🔥", "😂", "😱", "😭", "👏", "🍿", "🤯", "❤️"];
 const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
@@ -59,6 +60,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState("");
   const [localUrl, setLocalUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
   const [movieSource, setMovieSource] = useState(null);
   const [remoteMovieStream, setRemoteMovieStream] = useState(null);
   const [screenStream, setScreenStream] = useState(null);
@@ -79,6 +81,7 @@ function App() {
 
   const isHost = room?.hostId === socket.id;
   const invite = room ? `${window.location.origin}?room=${room.code}` : "";
+  const movieUrl = room?.playback?.mediaUrl ? `${serverUrl}${room.playback.mediaUrl}` : localUrl;
   const people = useMemo(() => room?.people || [], [room]);
   const remoteMediaList = Object.entries(remoteMedia).map(([peerId, stream]) => ({
     peerId,
@@ -120,6 +123,11 @@ function App() {
         syncing.current = false;
       }, 250);
     });
+    socket.on("movie:ready", (playback) => {
+      setMovieSource(playback.source || "upload");
+      setScreenStream(null);
+      setRemoteMovieStream(null);
+    });
     socket.on("webrtc:offer", handleOffer);
     socket.on("webrtc:answer", handleAnswer);
     socket.on("webrtc:ice", handleIce);
@@ -128,6 +136,7 @@ function App() {
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
+      socket.off("movie:ready");
       socket.off("webrtc:offer");
       socket.off("webrtc:answer");
       socket.off("webrtc:ice");
@@ -299,7 +308,7 @@ function App() {
     }
 
     for (const person of others) {
-      if (socket.id < person.id) makeOffer("call", person.id).catch(() => {});
+      if (localMediaRef.current && socket.id < person.id) makeOffer("call", person.id).catch(() => {});
       if (snapshot.hostId === socket.id && movieStreamRef.current) {
         makeOffer("movie", person.id).catch(() => {});
       }
@@ -324,7 +333,7 @@ function App() {
       if (key.startsWith("call:")) closePeer("call", key.slice("call:".length));
     }
     activeRoom.people
-      .filter((person) => person.id !== socket.id && socket.id < person.id)
+      .filter((person) => person.id !== socket.id)
       .forEach((person) => makeOffer("call", person.id).catch(() => {}));
   }
 
@@ -355,29 +364,27 @@ function App() {
     if (localUrl) URL.revokeObjectURL(localUrl);
     const nextUrl = URL.createObjectURL(file);
     setLocalUrl(nextUrl);
-    setMovieSource("file");
+    setUploading(true);
+    setMovieSource("upload");
     setRemoteMovieStream(null);
     setScreenStream(null);
-    socket.emit("playback:update", {
-      roomCode: room.code,
-      playback: {
-        paused: true,
-        currentTime: 0,
-        title: file.name
-      }
-    });
-  }
-
-  function captureMovieStream() {
-    const player = videoRef.current;
-    if (!player) return;
-    const stream = player.captureStream?.() || player.mozCaptureStream?.();
-    if (!stream) {
-      alert("This browser cannot broadcast video elements. Try Chrome or use screen share.");
-      return;
+    try {
+      const body = new FormData();
+      body.append("movie", file);
+      const response = await fetch(`${serverUrl}/api/rooms/${room.code}/movie`, {
+        method: "POST",
+        body
+      });
+      if (!response.ok) throw new Error("Upload failed");
+      const playback = await response.json();
+      setRoom((current) => current ? { ...current, playback } : current);
+      window.setTimeout(() => videoRef.current?.load(), 50);
+    } catch {
+      alert("Movie upload failed. Try a smaller file or use screen share.");
+    } finally {
+      setUploading(false);
+      event.target.value = "";
     }
-    movieStreamRef.current = stream;
-    restartMovieBroadcast();
   }
 
   async function shareScreen() {
@@ -388,7 +395,7 @@ function App() {
       movieStreamRef.current = stream;
       stream.getVideoTracks()[0]?.addEventListener("ended", () => {
         setScreenStream(null);
-        movieStreamRef.current = videoRef.current?.captureStream?.() || null;
+        movieStreamRef.current = null;
         restartMovieBroadcast();
       });
       restartMovieBroadcast();
@@ -501,13 +508,12 @@ function App() {
                 if (node) node.srcObject = screenStream;
               }}
             />
-          ) : isHost && localUrl ? (
+          ) : movieUrl ? (
             <video
               ref={videoRef}
               className="movie"
-              src={localUrl}
+              src={movieUrl}
               controls
-              onLoadedMetadata={captureMovieStream}
               onPlay={() => publishPlayback({ paused: false })}
               onPause={() => publishPlayback({ paused: true })}
               onSeeked={() => publishPlayback()}
@@ -550,7 +556,7 @@ function App() {
             {isHost && (
               <label className={`file-button ${localUrl ? "loaded" : ""}`}>
                 {localUrl ? <FileVideo size={18} /> : <Upload size={18} />}
-                {localUrl ? "Change Movie" : "Broadcast Movie"}
+                {uploading ? "Uploading..." : localUrl ? "Change Movie" : "Upload Movie"}
                 <input type="file" accept="video/*,.mkv" onChange={chooseFile} />
               </label>
             )}

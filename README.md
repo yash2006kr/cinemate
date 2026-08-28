@@ -5,11 +5,12 @@ A browser watch-party app for friends who already have the same movie file.
 ## V1
 
 - Create a room with a short code and invite link.
-- Everyone selects their own local movie file for original quality playback.
+- Host uploads one movie file and everyone streams the same served video URL.
 - Play, pause, seek, and resync over realtime sockets.
 - Chat and emoji reactions.
 - Screen-share fallback with browser audio capture when supported.
 - Presence list with mic/camera state toggles.
+- Peer camera/mic tiles over WebRTC.
 
 ## Run
 
