@@ -46,7 +46,7 @@ app.post("/api/rooms/:roomCode/movie", upload.single("movie"), (req, res) => {
     return;
   }
 
-  const mediaUrl = `/uploads/${req.file.filename}`;
+  const mediaUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
   room.playback = {
     ...room.playback,
     paused: true,

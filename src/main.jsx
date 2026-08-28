@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { upload } from "@vercel/blob/client";
 import { io } from "socket.io-client";
 import {
   Camera,
@@ -28,7 +29,10 @@ import {
 } from "lucide-react";
 import "./styles.css";
 
-const serverUrl = `${window.location.protocol}//${window.location.hostname}:3001`;
+const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname);
+const serverUrl = import.meta.env.VITE_SIGNALING_URL || (
+  isLocalhost ? "http://localhost:3001" : window.location.origin
+);
 const socket = io(serverUrl, { autoConnect: true });
 const reactions = ["🔥", "😂", "😱", "😭", "👏", "🍿", "🤯", "❤️"];
 const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
@@ -61,6 +65,7 @@ function App() {
   const [message, setMessage] = useState("");
   const [localUrl, setLocalUrl] = useState("");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [movieSource, setMovieSource] = useState(null);
   const [remoteMovieStream, setRemoteMovieStream] = useState(null);
   const [screenStream, setScreenStream] = useState(null);
@@ -81,7 +86,7 @@ function App() {
 
   const isHost = room?.hostId === socket.id;
   const invite = room ? `${window.location.origin}?room=${room.code}` : "";
-  const movieUrl = room?.playback?.mediaUrl ? `${serverUrl}${room.playback.mediaUrl}` : localUrl;
+  const movieUrl = room?.playback?.mediaUrl || localUrl;
   const people = useMemo(() => room?.people || [], [room]);
   const remoteMediaList = Object.entries(remoteMedia).map(([peerId, stream]) => ({
     peerId,
@@ -365,26 +370,70 @@ function App() {
     const nextUrl = URL.createObjectURL(file);
     setLocalUrl(nextUrl);
     setUploading(true);
+    setUploadProgress(0);
     setMovieSource("upload");
     setRemoteMovieStream(null);
     setScreenStream(null);
     try {
-      const body = new FormData();
-      body.append("movie", file);
-      const response = await fetch(`${serverUrl}/api/rooms/${room.code}/movie`, {
-        method: "POST",
-        body
-      });
-      if (!response.ok) throw new Error("Upload failed");
-      const playback = await response.json();
+      const playback = isLocalhost
+        ? await uploadToLocalServer(file)
+        : await uploadToVercelBlob(file);
       setRoom((current) => current ? { ...current, playback } : current);
       window.setTimeout(() => videoRef.current?.load(), 50);
     } catch {
       alert("Movie upload failed. Try a smaller file or use screen share.");
     } finally {
       setUploading(false);
+      setUploadProgress(0);
       event.target.value = "";
     }
+  }
+
+  async function uploadToLocalServer(file) {
+    const body = new FormData();
+    body.append("movie", file);
+    const response = await fetch(`${serverUrl}/api/rooms/${room.code}/movie`, {
+      method: "POST",
+      body
+    });
+    if (!response.ok) throw new Error("Upload failed");
+    const playback = await response.json();
+    return {
+      ...playback,
+      mediaUrl: `${serverUrl}${playback.mediaUrl}`
+    };
+  }
+
+  async function uploadToVercelBlob(file) {
+    const safeName = file.name.replace(/[^\w.\-() ]/g, "_");
+    const blob = await upload(`rooms/${room.code}/${Date.now()}-${safeName}`, file, {
+      access: "public",
+      handleUploadUrl: "/api/blob/upload",
+      multipart: true,
+      clientPayload: JSON.stringify({
+        roomCode: room.code,
+        title: file.name
+      }),
+      onUploadProgress: (progressEvent) => {
+        setUploadProgress(Math.round(progressEvent.percentage || 0));
+      }
+    });
+
+    const playback = {
+      paused: true,
+      currentTime: 0,
+      updatedAt: Date.now(),
+      title: file.name,
+      mediaUrl: blob.url,
+      source: "blob"
+    };
+
+    socket.emit("playback:update", {
+      roomCode: room.code,
+      playback
+    });
+
+    return playback;
   }
 
   async function shareScreen() {
@@ -556,7 +605,7 @@ function App() {
             {isHost && (
               <label className={`file-button ${localUrl ? "loaded" : ""}`}>
                 {localUrl ? <FileVideo size={18} /> : <Upload size={18} />}
-                {uploading ? "Uploading..." : localUrl ? "Change Movie" : "Upload Movie"}
+                {uploading ? `Uploading ${uploadProgress}%` : localUrl ? "Change Movie" : "Upload Movie"}
                 <input type="file" accept="video/*,.mkv" onChange={chooseFile} />
               </label>
             )}

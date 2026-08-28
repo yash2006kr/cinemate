@@ -21,6 +21,10 @@ pnpm dev
 
 Open `http://localhost:5173`.
 
+## Deploy
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full Vercel + Blob setup.
+
 ## Roadmap
 
 - WebRTC camera/mic streams using an SFU such as LiveKit or mediasoup.
