@@ -85,6 +85,68 @@ Set its port with:
 PORT=3001
 ```
 
+On Render, do not create `PORT` manually. Render provides it automatically.
+
+Add this environment variable to Render too, so the realtime server can delete uploaded Blob movies when rooms end or everyone leaves:
+
+```bash
+BLOB_READ_WRITE_TOKEN=your_vercel_blob_read_write_token
+```
+
+You can copy the value from Vercel:
+
+1. Open the Vercel project.
+2. Go to **Settings**.
+3. Open **Environment Variables**.
+4. Find `BLOB_READ_WRITE_TOKEN`.
+5. Copy it into Render.
+
+## Cleanup Uploaded Movies
+
+The app deletes the active uploaded movie when:
+
+- the host clicks **End Room**;
+- everyone leaves or closes their tabs;
+- the realtime server shuts down cleanly.
+
+To delete old test uploads manually, run:
+
+```bash
+pnpm blob:cleanup
+```
+
+That command needs `BLOB_READ_WRITE_TOKEN` in the shell environment.
+
+On Windows PowerShell:
+
+```powershell
+$env:BLOB_READ_WRITE_TOKEN="paste-token-here"
+pnpm blob:cleanup
+```
+
+You can also delete old files from Vercel:
+
+1. Open Vercel.
+2. Go to **Storage**.
+3. Open `cinemate-movies`.
+4. Open the `rooms/` folder.
+5. Select the old test files.
+6. Click **Delete**.
+
+## 1GB+ Movie Uploads
+
+Yes, 1GB+ uploads are possible with Vercel Blob client uploads.
+
+Use these rules:
+
+- Prefer `.mp4` with H.264 video and AAC audio.
+- Avoid `.mkv` for now; many browsers cannot play MKV directly.
+- Keep the Blob store **Public** for simple browser playback.
+- Use a strong connection before uploading big files.
+- Test with a 50-100MB MP4 before trying a full 1GB+ movie.
+
+Large uploads go directly from the browser to Vercel Blob using multipart upload, so they do not pass through the Vercel Function body limit.
+
 ## First Production Test
 
 1. Open the deployed Vercel URL.

@@ -1,7 +1,9 @@
 import express from "express";
 import multer from "multer";
+import { del } from "@vercel/blob";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { Server } from "socket.io";
 
@@ -16,6 +18,7 @@ const io = new Server(server, {
 
 const rooms = new Map();
 const uploadsDir = join(process.cwd(), "uploads");
+const cleanupTimers = new Map();
 
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 
@@ -38,7 +41,19 @@ app.use("/uploads", express.static(uploadsDir, {
   maxAge: 0
 }));
 
-app.post("/api/rooms/:roomCode/movie", upload.single("movie"), (req, res) => {
+app.get("/", (req, res) => {
+  res.json({
+    ok: true,
+    service: "cinemate-realtime",
+    rooms: rooms.size
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true });
+});
+
+app.post("/api/rooms/:roomCode/movie", upload.single("movie"), async (req, res) => {
   const roomCode = String(req.params.roomCode || "").trim().toUpperCase();
   const room = rooms.get(roomCode);
   if (!room || !req.file) {
@@ -47,6 +62,7 @@ app.post("/api/rooms/:roomCode/movie", upload.single("movie"), (req, res) => {
   }
 
   const mediaUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  await deleteRoomMovie(room);
   room.playback = {
     ...room.playback,
     paused: true,
@@ -54,6 +70,8 @@ app.post("/api/rooms/:roomCode/movie", upload.single("movie"), (req, res) => {
     updatedAt: Date.now(),
     title: req.file.originalname,
     mediaUrl,
+    pathname: null,
+    localPath: req.file.path,
     source: "upload"
   };
 
@@ -77,18 +95,65 @@ function roomSnapshot(roomCode) {
   };
 }
 
+function resetPlayback() {
+  return {
+    paused: true,
+    currentTime: 0,
+    updatedAt: Date.now(),
+    title: "No movie selected",
+    mediaUrl: null,
+    pathname: null,
+    localPath: null,
+    source: null
+  };
+}
+
+async function deleteRoomMovie(room) {
+  const { playback } = room;
+  const deleteTargets = [];
+  if (playback?.pathname) deleteTargets.push(playback.pathname);
+  else if (playback?.source === "blob" && playback?.mediaUrl) deleteTargets.push(playback.mediaUrl);
+
+  if (deleteTargets.length > 0 && process.env.BLOB_READ_WRITE_TOKEN) {
+    await del(deleteTargets).catch((error) => {
+      console.warn("Blob cleanup failed:", error.message);
+    });
+  }
+
+  if (playback?.localPath) {
+    await unlink(playback.localPath).catch(() => {});
+  }
+}
+
+async function endRoom(roomCode, reason = "ended") {
+  const room = rooms.get(roomCode);
+  if (!room) return;
+  await deleteRoomMovie(room);
+  io.to(roomCode).emit("room:ended", { reason });
+  io.in(roomCode).socketsLeave(roomCode);
+  rooms.delete(roomCode);
+  if (cleanupTimers.has(roomCode)) {
+    clearTimeout(cleanupTimers.get(roomCode));
+    cleanupTimers.delete(roomCode);
+  }
+}
+
+function scheduleEmptyRoomCleanup(roomCode) {
+  if (cleanupTimers.has(roomCode)) clearTimeout(cleanupTimers.get(roomCode));
+  cleanupTimers.set(roomCode, setTimeout(() => {
+    endRoom(roomCode, "empty").catch((error) => {
+      console.warn("Empty room cleanup failed:", error.message);
+    });
+  }, 5000));
+}
+
 function ensureRoom(roomCode, hostId) {
   if (!rooms.has(roomCode)) {
     rooms.set(roomCode, {
       hostId,
       people: new Map(),
       playback: {
-        paused: true,
-        currentTime: 0,
-        updatedAt: Date.now(),
-        title: "No movie selected",
-        mediaUrl: null,
-        source: null
+        ...resetPlayback()
       }
     });
   }
@@ -99,11 +164,15 @@ io.on("connection", (socket) => {
   socket.on("room:create", ({ name }, reply) => {
     const roomCode = code();
     const room = ensureRoom(roomCode, socket.id);
+    if (cleanupTimers.has(roomCode)) {
+      clearTimeout(cleanupTimers.get(roomCode));
+      cleanupTimers.delete(roomCode);
+    }
     room.people.set(socket.id, {
       id: socket.id,
       name: name || "Host",
       avatar: (name || "H").slice(0, 1).toUpperCase(),
-      audio: true,
+      audio: false,
       video: false,
       host: true
     });
@@ -123,11 +192,15 @@ io.on("connection", (socket) => {
       id: socket.id,
       name: name || "Friend",
       avatar: (name || "F").slice(0, 1).toUpperCase(),
-      audio: true,
+      audio: false,
       video: false,
       host: socket.id === room.hostId
     });
     socket.join(normalized);
+    if (cleanupTimers.has(normalized)) {
+      clearTimeout(cleanupTimers.get(normalized));
+      cleanupTimers.delete(normalized);
+    }
     reply?.(roomSnapshot(normalized));
     io.to(normalized).emit("room:update", roomSnapshot(normalized));
   });
@@ -143,13 +216,23 @@ io.on("connection", (socket) => {
   socket.on("playback:update", ({ roomCode, playback }) => {
     const room = rooms.get(roomCode);
     if (!room) return;
+    const previousPlayback = room.playback;
     room.playback = {
       ...room.playback,
       ...playback,
       updatedAt: Date.now()
     };
+    if (playback.mediaUrl && playback.mediaUrl !== previousPlayback.mediaUrl) {
+      deleteRoomMovie({ playback: previousPlayback }).catch(() => {});
+    }
     socket.to(roomCode).emit("playback:sync", room.playback);
     io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+  });
+
+  socket.on("room:end", async ({ roomCode }) => {
+    const room = rooms.get(roomCode);
+    if (!room || room.hostId !== socket.id) return;
+    await endRoom(roomCode, "host-ended");
   });
 
   socket.on("chat:send", ({ roomCode, message }) => {
@@ -217,10 +300,22 @@ io.on("connection", (socket) => {
           room.people.set(next, { ...person, host: true });
         }
       }
-      if (room.people.size === 0) rooms.delete(roomCode);
+      if (room.people.size === 0) scheduleEmptyRoomCleanup(roomCode);
       else io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
     }
   });
+});
+
+async function cleanupAllRooms() {
+  await Promise.all([...rooms.keys()].map((roomCode) => endRoom(roomCode, "server-shutdown")));
+}
+
+process.on("SIGTERM", () => {
+  cleanupAllRooms().finally(() => process.exit(0));
+});
+
+process.on("SIGINT", () => {
+  cleanupAllRooms().finally(() => process.exit(0));
 });
 
 const port = process.env.PORT || 3001;

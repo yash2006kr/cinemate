@@ -7,6 +7,7 @@ import {
   CameraOff,
   Clapperboard,
   Copy,
+  DoorClosed,
   Expand,
   FileVideo,
   Link,
@@ -51,7 +52,7 @@ function VideoTile({ stream, name, muted = false }) {
 
   return (
     <div className="video-tile">
-      <video ref={ref} autoPlay playsInline muted={muted} />
+      <video ref={ref} autoPlay playsInline webkit-playsinline="true" muted={muted} />
       <span>{name}</span>
     </div>
   );
@@ -74,6 +75,8 @@ function App() {
   const [floating, setFloating] = useState([]);
   const [device, setDevice] = useState({ audio: false, video: false });
   const [theaterMode, setTheaterMode] = useState(false);
+  const [connectionState, setConnectionState] = useState(socket.connected ? "connected" : "connecting");
+  const [needsPlaybackGesture, setNeedsPlaybackGesture] = useState(false);
   const videoRef = useRef(null);
   const remoteMovieRef = useRef(null);
   const theaterRef = useRef(null);
@@ -109,6 +112,17 @@ function App() {
       setRoom(snapshot);
       reconcilePeers(snapshot);
     });
+    socket.on("connect", () => setConnectionState("connected"));
+    socket.on("disconnect", () => setConnectionState("disconnected"));
+    socket.on("connect_error", () => setConnectionState("disconnected"));
+    socket.on("room:ended", () => {
+      closeAllPeers();
+      setRoom(null);
+      setLocalUrl("");
+      setRemoteMovieStream(null);
+      setScreenStream(null);
+      alert("The room has ended and its uploaded movie was scheduled for cleanup.");
+    });
     socket.on("chat:new", (next) => setMessages((current) => [...current, next]));
     socket.on("reaction:new", (next) => {
       setFloating((current) => [...current, next]);
@@ -117,16 +131,7 @@ function App() {
       }, 2400);
     });
     socket.on("playback:sync", (playback) => {
-      const player = videoRef.current;
-      if (!player) return;
-      syncing.current = true;
-      const target = syncTime(playback);
-      if (Math.abs(player.currentTime - target) > 0.45) player.currentTime = target;
-      if (playback.paused) player.pause();
-      else player.play().catch(() => {});
-      window.setTimeout(() => {
-        syncing.current = false;
-      }, 250);
+      applyPlayback(playback);
     });
     socket.on("movie:ready", (playback) => {
       setMovieSource(playback.source || "upload");
@@ -138,6 +143,10 @@ function App() {
     socket.on("webrtc:ice", handleIce);
     return () => {
       socket.off("room:update");
+      socket.off("connect");
+      socket.off("disconnect");
+      socket.off("connect_error");
+      socket.off("room:ended");
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
@@ -152,8 +161,13 @@ function App() {
   useEffect(() => {
     if (!remoteMovieRef.current) return;
     remoteMovieRef.current.srcObject = remoteMovieStream;
-    if (remoteMovieStream) remoteMovieRef.current.play().catch(() => {});
+    if (remoteMovieStream) attemptPlay(remoteMovieRef.current);
   }, [remoteMovieStream]);
+
+  useEffect(() => {
+    if (!movieUrl || !room?.playback) return;
+    window.setTimeout(() => applyPlayback(room.playback), 150);
+  }, [movieUrl, room?.playback?.mediaUrl]);
 
   function rememberName() {
     const clean = name.trim() || "Movie Buddy";
@@ -189,6 +203,32 @@ function App() {
         ...patch
       }
     });
+  }
+
+  function attemptPlay(player) {
+    if (!player) return;
+    player.play()
+      .then(() => setNeedsPlaybackGesture(false))
+      .catch(() => setNeedsPlaybackGesture(true));
+  }
+
+  function applyPlayback(playback) {
+    const player = videoRef.current;
+    if (!player || !playback) return;
+    syncing.current = true;
+    const target = syncTime(playback);
+    if (Number.isFinite(target) && Math.abs(player.currentTime - target) > 0.45) {
+      player.currentTime = Math.max(0, target);
+    }
+    if (playback.paused) {
+      player.pause();
+      setNeedsPlaybackGesture(false);
+    } else {
+      attemptPlay(player);
+    }
+    window.setTimeout(() => {
+      syncing.current = false;
+    }, 250);
   }
 
   function emitSignal(event, peerId, channel, payload) {
@@ -352,7 +392,15 @@ function App() {
     }
 
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: nextDevice.audio,
+      audio: nextDevice.audio
+        ? {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+            channelCount: 1,
+            sampleRate: 48000
+          }
+        : false,
       video: nextDevice.video
         ? { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }
         : false
@@ -380,6 +428,7 @@ function App() {
         : await uploadToVercelBlob(file);
       setRoom((current) => current ? { ...current, playback } : current);
       window.setTimeout(() => videoRef.current?.load(), 50);
+      window.setTimeout(() => applyPlayback(playback), 250);
     } catch {
       alert("Movie upload failed. Try a smaller file or use screen share.");
     } finally {
@@ -398,10 +447,7 @@ function App() {
     });
     if (!response.ok) throw new Error("Upload failed");
     const playback = await response.json();
-    return {
-      ...playback,
-      mediaUrl: `${serverUrl}${playback.mediaUrl}`
-    };
+    return playback;
   }
 
   async function uploadToVercelBlob(file) {
@@ -425,6 +471,7 @@ function App() {
       updatedAt: Date.now(),
       title: file.name,
       mediaUrl: blob.url,
+      pathname: blob.pathname,
       source: "blob"
     };
 
@@ -488,6 +535,17 @@ function App() {
     publishPlayback();
   }
 
+  function unlockPlayback() {
+    attemptPlay(videoRef.current || remoteMovieRef.current);
+  }
+
+  function endRoom() {
+    if (!room || !isHost) return;
+    const confirmed = window.confirm("End this room for everyone and delete the uploaded movie?");
+    if (!confirmed) return;
+    socket.emit("room:end", { roomCode: room.code });
+  }
+
   if (!room) {
     return (
       <main className="landing">
@@ -536,6 +594,7 @@ function App() {
             <span>Cinemate</span>
           </div>
           <p>{room.playback.title}</p>
+          <span className={`connection ${connectionState}`}>{connectionState}</span>
         </div>
         <div className="room-code">
           <span>{room.code}</span>
@@ -550,12 +609,13 @@ function App() {
           {isHost && screenStream ? (
             <video
               autoPlay
-              playsInline
               muted
               className="movie"
               ref={(node) => {
                 if (node) node.srcObject = screenStream;
               }}
+              playsInline
+              webkit-playsinline="true"
             />
           ) : movieUrl ? (
             <video
@@ -563,12 +623,25 @@ function App() {
               className="movie"
               src={movieUrl}
               controls
+              playsInline
+              webkit-playsinline="true"
+              preload="metadata"
+              crossOrigin="anonymous"
+              controlsList="nodownload noplaybackrate"
+              disablePictureInPicture
               onPlay={() => publishPlayback({ paused: false })}
               onPause={() => publishPlayback({ paused: true })}
               onSeeked={() => publishPlayback()}
             />
           ) : remoteMovieStream ? (
-            <video ref={remoteMovieRef} className="movie" autoPlay playsInline controls />
+            <video
+              ref={remoteMovieRef}
+              className="movie"
+              autoPlay
+              playsInline
+              webkit-playsinline="true"
+              controls
+            />
           ) : (
             <div className="empty">
               <Radio size={46} />
@@ -598,6 +671,15 @@ function App() {
               <span key={item.id} style={{ left: `${item.x}%` }}>{item.reaction}</span>
             ))}
           </div>
+
+          {needsPlaybackGesture && (
+            <div className="playback-unlock">
+              <button onClick={unlockPlayback}>
+                <Play size={18} />
+                Start playback
+              </button>
+            </div>
+          )}
         </div>
 
         <aside className="side">
@@ -621,6 +703,11 @@ function App() {
             <button onClick={toggleFullscreen} title="Fullscreen">
               <Maximize2 size={18} />
             </button>
+            {isHost && (
+              <button className="danger" onClick={endRoom} title="End room and delete movie">
+                <DoorClosed size={18} />
+              </button>
+            )}
           </div>
 
           <div className="sync-card">
@@ -639,7 +726,7 @@ function App() {
 
           <div className="watch-stats">
             <div><strong>{people.length}</strong><span>inside</span></div>
-            <div><strong>{remoteMovieStream || isHost ? "Live" : "Idle"}</strong><span>stream</span></div>
+            <div><strong>{movieUrl || remoteMovieStream || screenStream ? "Live" : "Idle"}</strong><span>stream</span></div>
             <div><strong>{movieSource === "screen" ? "Screen" : "Movie"}</strong><span>source</span></div>
           </div>
 
