@@ -151,6 +151,7 @@ function removePersonFromRoom(socketId, roomCode, reason = "left") {
   const room = rooms.get(roomCode);
   if (!room?.people.has(socketId)) return;
 
+  const leavingPerson = room.people.get(socketId);
   const wasHost = room.hostId === socketId;
   room.people.delete(socketId);
 
@@ -167,7 +168,14 @@ function removePersonFromRoom(socketId, roomCode, reason = "left") {
   io.in(socketId).socketsLeave(roomCode);
 
   if (room.people.size === 0) scheduleEmptyRoomCleanup(roomCode);
-  else io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+  else {
+    io.to(roomCode).emit("presence:left", {
+      id: socketId,
+      name: leavingPerson?.name || "Friend",
+      reason
+    });
+    io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+  }
 }
 
 function ensureRoom(roomCode, hostId) {
@@ -225,6 +233,10 @@ io.on("connection", (socket) => {
       cleanupTimers.delete(normalized);
     }
     reply?.(roomSnapshot(normalized));
+    socket.to(normalized).emit("presence:joined", {
+      id: socket.id,
+      name: name || "Friend"
+    });
     io.to(normalized).emit("room:update", roomSnapshot(normalized));
   });
 

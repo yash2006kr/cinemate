@@ -49,12 +49,21 @@ function VideoTile({ stream, name, muted = false }) {
   const ref = useRef(null);
 
   useEffect(() => {
-    if (ref.current) ref.current.srcObject = stream;
+    if (!ref.current) return;
+    ref.current.srcObject = stream;
+    ref.current.play().catch(() => {});
   }, [stream]);
 
   return (
     <div className="video-tile">
-      <video ref={ref} autoPlay playsInline webkit-playsinline="true" muted={muted} />
+      <video
+        ref={ref}
+        autoPlay
+        playsInline
+        webkit-playsinline="true"
+        muted={muted}
+        onLoadedMetadata={() => ref.current?.play().catch(() => {})}
+      />
       <span>{name}</span>
     </div>
   );
@@ -80,12 +89,15 @@ function App() {
   const [theaterMode, setTheaterMode] = useState(false);
   const [connectionState, setConnectionState] = useState(socket.connected ? "connected" : "connecting");
   const [needsPlaybackGesture, setNeedsPlaybackGesture] = useState(false);
+  const [playerWarning, setPlayerWarning] = useState("");
   const videoRef = useRef(null);
   const remoteMovieRef = useRef(null);
   const theaterRef = useRef(null);
   const syncing = useRef(false);
   const peerConnections = useRef(new Map());
   const pendingIce = useRef(new Map());
+  const remoteStreams = useRef(new Map());
+  const audioContextRef = useRef(null);
   const movieStreamRef = useRef(null);
   const localMediaRef = useRef(null);
   const roomRef = useRef(null);
@@ -145,6 +157,14 @@ function App() {
       resetLocalRoom();
       if (reason === "kicked") alert("The host removed you from the room.");
     });
+    socket.on("presence:joined", ({ name }) => {
+      playPresenceTone("join");
+      addSystemMessage(`${name || "Someone"} joined the room`);
+    });
+    socket.on("presence:left", ({ name, reason }) => {
+      playPresenceTone("leave");
+      addSystemMessage(`${name || "Someone"} ${reason === "kicked" ? "was removed" : "left"} the room`);
+    });
     socket.on("chat:new", (next) => setMessages((current) => [...current, next]));
     socket.on("reaction:new", (next) => {
       setFloating((current) => [...current, next]);
@@ -170,6 +190,8 @@ function App() {
       socket.off("connect_error");
       socket.off("room:ended");
       socket.off("room:left");
+      socket.off("presence:joined");
+      socket.off("presence:left");
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
@@ -210,6 +232,42 @@ function App() {
     setRemoteMedia({});
     setDevice({ audio: false, video: false });
     setNeedsPlaybackGesture(false);
+    setPlayerWarning("");
+  }
+
+  function addSystemMessage(messageText) {
+    setMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        name: "Cinemate",
+        message: messageText,
+        at: new Date().toISOString()
+      }
+    ]);
+  }
+
+  function playPresenceTone(type) {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContext) return;
+      const context = audioContextRef.current || new AudioContext();
+      audioContextRef.current = context;
+      context.resume?.().catch(() => {});
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = type === "join" ? 660 : 330;
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.12, context.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.18);
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.2);
+    } catch {
+      // Presence sounds are nice-to-have and browser gesture policies may block them.
+    }
   }
 
   function createRoom() {
@@ -247,6 +305,28 @@ function App() {
     player.play()
       .then(() => setNeedsPlaybackGesture(false))
       .catch(() => setNeedsPlaybackGesture(true));
+  }
+
+  function canBrowserPlay(file) {
+    const probe = document.createElement("video");
+    const typeOk = file.type && probe.canPlayType(file.type);
+    if (typeOk) return true;
+    return /\.(mp4|m4v|webm|ogv|ogg)$/i.test(file.name);
+  }
+
+  function handleMovieMetadata() {
+    const player = videoRef.current;
+    if (!player) return;
+    if (player.videoWidth === 0 && player.readyState > 0) {
+      setPlayerWarning("This file has audio, but the browser cannot decode its video track. Use MP4 H.264 video with AAC audio for everyone to see it.");
+      return;
+    }
+    setPlayerWarning("");
+    applyPlayback(roomRef.current?.playback);
+  }
+
+  function handleMovieError() {
+    setPlayerWarning("This browser could not load the movie video. Try MP4 H.264 + AAC, or use screen share for this file.");
   }
 
   function applyPlayback(playback) {
@@ -288,12 +368,41 @@ function App() {
     peerConnections.current.get(key)?.close();
     peerConnections.current.delete(key);
     pendingIce.current.delete(key);
+    remoteStreams.current.delete(key);
   }
 
   function closeAllPeers() {
     for (const pc of peerConnections.current.values()) pc.close();
     peerConnections.current.clear();
     pendingIce.current.clear();
+    remoteStreams.current.clear();
+  }
+
+  function ensureCallTransceivers(pc) {
+    const hasAudio = pc.getTransceivers().some((transceiver) => (
+      transceiver.sender?.track?.kind === "audio" || transceiver.receiver?.track?.kind === "audio"
+    ));
+    const hasVideo = pc.getTransceivers().some((transceiver) => (
+      transceiver.sender?.track?.kind === "video" || transceiver.receiver?.track?.kind === "video"
+    ));
+    if (!hasAudio) pc.addTransceiver("audio", { direction: "sendrecv" });
+    if (!hasVideo) pc.addTransceiver("video", { direction: "sendrecv" });
+  }
+
+  async function syncCallTracks(pc) {
+    ensureCallTransceivers(pc);
+    const stream = localMediaRef.current;
+    const audioTrack = stream?.getAudioTracks()[0] || null;
+    const videoTrack = stream?.getVideoTracks()[0] || null;
+    const audioSender = pc.getTransceivers().find((transceiver) => (
+      transceiver.sender?.track?.kind === "audio" || transceiver.receiver?.track?.kind === "audio"
+    ))?.sender;
+    const videoSender = pc.getTransceivers().find((transceiver) => (
+      transceiver.sender?.track?.kind === "video" || transceiver.receiver?.track?.kind === "video"
+    ))?.sender;
+
+    await audioSender?.replaceTrack(audioTrack);
+    await videoSender?.replaceTrack(videoTrack);
   }
 
   function createPeer(channel, peerId) {
@@ -321,15 +430,17 @@ function App() {
     };
 
     pc.ontrack = (event) => {
-      const [stream] = event.streams;
-      if (!stream) return;
+      let [stream] = event.streams;
+      if (!stream) {
+        stream = remoteStreams.current.get(key) || new MediaStream();
+        remoteStreams.current.set(key, stream);
+        if (!stream.getTracks().some((track) => track.id === event.track.id)) {
+          stream.addTrack(event.track);
+        }
+      }
       if (channel === "movie") setRemoteMovieStream(stream);
       if (channel === "call") setRemoteMedia((current) => ({ ...current, [peerId]: stream }));
     };
-
-    if (channel === "call" && localMediaRef.current) {
-      localMediaRef.current.getTracks().forEach((track) => pc.addTrack(track, localMediaRef.current));
-    }
 
     if (channel === "movie" && roomRef.current?.hostId === socket.id && movieStreamRef.current) {
       movieStreamRef.current.getTracks().forEach((track) => pc.addTrack(track, movieStreamRef.current));
@@ -340,6 +451,7 @@ function App() {
 
   async function makeOffer(channel, peerId) {
     const pc = createPeer(channel, peerId);
+    if (channel === "call") await syncCallTracks(pc);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     emitSignal("webrtc:offer", peerId, channel, { description: pc.localDescription });
@@ -348,6 +460,7 @@ function App() {
   async function handleOffer({ from, channel, description }) {
     const pc = createPeer(channel, from);
     await pc.setRemoteDescription(description);
+    if (channel === "call") await syncCallTracks(pc);
     await flushIce(channel, from);
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
@@ -390,7 +503,9 @@ function App() {
     }
 
     for (const person of others) {
-      if (localMediaRef.current && socket.id < person.id) makeOffer("call", person.id).catch(() => {});
+      if (localMediaRef.current && socket.id < person.id && !peerConnections.current.has(peerKey("call", person.id))) {
+        makeOffer("call", person.id).catch(() => {});
+      }
       if (snapshot.hostId === socket.id && movieStreamRef.current) {
         makeOffer("movie", person.id).catch(() => {});
       }
@@ -451,9 +566,19 @@ function App() {
   async function chooseFile(event) {
     const file = event.target.files?.[0];
     if (!file) return;
+    if (!canBrowserPlay(file)) {
+      const confirmed = window.confirm(
+        "This file may upload, but browsers often show a blank video for MKV/HEVC/x265 files. MP4 H.264 + AAC is the safest format. Upload anyway?"
+      );
+      if (!confirmed) {
+        event.target.value = "";
+        return;
+      }
+    }
     if (localUrl) URL.revokeObjectURL(localUrl);
     const nextUrl = URL.createObjectURL(file);
     setLocalUrl(nextUrl);
+    setPlayerWarning("");
     setUploading(true);
     setUploadProgress(0);
     setMovieSource("upload");
@@ -669,6 +794,7 @@ function App() {
             />
           ) : movieUrl ? (
             <video
+              key={movieUrl}
               ref={videoRef}
               className="movie"
               src={movieUrl}
@@ -676,9 +802,12 @@ function App() {
               playsInline
               webkit-playsinline="true"
               preload="metadata"
-              crossOrigin="anonymous"
               controlsList="nodownload noplaybackrate"
               disablePictureInPicture
+              onLoadedMetadata={handleMovieMetadata}
+              onCanPlay={handleMovieMetadata}
+              onError={handleMovieError}
+              onStalled={() => setPlayerWarning("The movie is buffering. Large files may take a moment to start on slower networks.")}
               onPlay={() => publishPlayback({ paused: false })}
               onPause={() => publishPlayback({ paused: true })}
               onSeeked={() => publishPlayback()}
@@ -730,6 +859,13 @@ function App() {
               </button>
             </div>
           )}
+
+          {playerWarning && (
+            <div className="player-warning">
+              <strong>Video issue</strong>
+              <span>{playerWarning}</span>
+            </div>
+          )}
         </div>
 
         <aside className="side">
@@ -738,7 +874,7 @@ function App() {
               <label className={`file-button ${localUrl ? "loaded" : ""}`}>
                 {localUrl ? <FileVideo size={18} /> : <Upload size={18} />}
                 {uploading ? `Uploading ${uploadProgress}%` : localUrl ? "Change Movie" : "Upload Movie"}
-                <input type="file" accept="video/*,.mkv" onChange={chooseFile} />
+                <input type="file" accept="video/mp4,video/webm,video/ogg,.mp4,.m4v,.webm,.ogv,.ogg,.mkv" onChange={chooseFile} />
               </label>
             )}
             {isHost && (
