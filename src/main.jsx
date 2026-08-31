@@ -11,6 +11,7 @@ import {
   Expand,
   FileVideo,
   Link,
+  LogOut,
   Maximize2,
   MessageCircle,
   Mic,
@@ -24,6 +25,7 @@ import {
   Sparkles,
   Subtitles,
   Upload,
+  UserX,
   Users,
   Volume2,
   Wand2
@@ -61,6 +63,7 @@ function VideoTile({ stream, name, muted = false }) {
 function App() {
   const [name, setName] = useState(localStorage.getItem("cinemate:name") || "");
   const [joinCode, setJoinCode] = useState("");
+  const [linkRoomCode, setLinkRoomCode] = useState("");
   const [room, setRoom] = useState(null);
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState("");
@@ -86,6 +89,7 @@ function App() {
   const movieStreamRef = useRef(null);
   const localMediaRef = useRef(null);
   const roomRef = useRef(null);
+  const autoJoinAttempted = useRef(false);
 
   const isHost = room?.hostId === socket.id;
   const invite = room ? `${window.location.origin}?room=${room.code}` : "";
@@ -104,8 +108,26 @@ function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomParam = params.get("room");
-    if (roomParam) setJoinCode(roomParam.toUpperCase());
+    if (roomParam) {
+      const normalized = roomParam.toUpperCase();
+      setJoinCode(normalized);
+      setLinkRoomCode(normalized);
+    }
   }, []);
+
+  useEffect(() => {
+    if (!linkRoomCode || room || autoJoinAttempted.current) return;
+    autoJoinAttempted.current = true;
+    socket.emit("room:join", { roomCode: linkRoomCode, name: rememberName() }, (snapshot) => {
+      if (snapshot?.error) {
+        autoJoinAttempted.current = false;
+        alert(snapshot.error);
+      } else {
+        setRoom(snapshot);
+        reconcilePeers(snapshot);
+      }
+    });
+  }, [linkRoomCode, room]);
 
   useEffect(() => {
     socket.on("room:update", (snapshot) => {
@@ -116,12 +138,12 @@ function App() {
     socket.on("disconnect", () => setConnectionState("disconnected"));
     socket.on("connect_error", () => setConnectionState("disconnected"));
     socket.on("room:ended", () => {
-      closeAllPeers();
-      setRoom(null);
-      setLocalUrl("");
-      setRemoteMovieStream(null);
-      setScreenStream(null);
+      resetLocalRoom();
       alert("The room has ended and its uploaded movie was scheduled for cleanup.");
+    });
+    socket.on("room:left", ({ reason }) => {
+      resetLocalRoom();
+      if (reason === "kicked") alert("The host removed you from the room.");
     });
     socket.on("chat:new", (next) => setMessages((current) => [...current, next]));
     socket.on("reaction:new", (next) => {
@@ -147,6 +169,7 @@ function App() {
       socket.off("disconnect");
       socket.off("connect_error");
       socket.off("room:ended");
+      socket.off("room:left");
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
@@ -173,6 +196,20 @@ function App() {
     const clean = name.trim() || "Movie Buddy";
     localStorage.setItem("cinemate:name", clean);
     return clean;
+  }
+
+  function resetLocalRoom() {
+    closeAllPeers();
+    localMediaRef.current?.getTracks().forEach((track) => track.stop());
+    movieStreamRef.current?.getTracks().forEach((track) => track.stop());
+    setRoom(null);
+    setLocalUrl("");
+    setRemoteMovieStream(null);
+    setScreenStream(null);
+    setLocalMediaStream(null);
+    setRemoteMedia({});
+    setDevice({ audio: false, video: false });
+    setNeedsPlaybackGesture(false);
   }
 
   function createRoom() {
@@ -546,6 +583,19 @@ function App() {
     socket.emit("room:end", { roomCode: room.code });
   }
 
+  function leaveRoom() {
+    if (!room) return;
+    socket.emit("room:leave", { roomCode: room.code });
+    resetLocalRoom();
+  }
+
+  function kickPerson(person) {
+    if (!room || !isHost || person.host) return;
+    const confirmed = window.confirm(`Remove ${person.name} from this room?`);
+    if (!confirmed) return;
+    socket.emit("room:kick", { roomCode: room.code, personId: person.id });
+  }
+
   if (!room) {
     return (
       <main className="landing">
@@ -691,9 +741,11 @@ function App() {
                 <input type="file" accept="video/*,.mkv" onChange={chooseFile} />
               </label>
             )}
-            <button className={movieSource === "screen" ? "active" : ""} onClick={shareScreen} title="Share screen with audio">
-              <MonitorUp size={18} />
-            </button>
+            {isHost && (
+              <button className={movieSource === "screen" ? "active" : ""} onClick={shareScreen} title="Share screen with audio">
+                <MonitorUp size={18} />
+              </button>
+            )}
             <button className={device.audio ? "active" : ""} onClick={() => toggleDevice("audio")} title="Toggle mic">
               {device.audio ? <Mic size={18} /> : <MicOff size={18} />}
             </button>
@@ -706,6 +758,11 @@ function App() {
             {isHost && (
               <button className="danger" onClick={endRoom} title="End room and delete movie">
                 <DoorClosed size={18} />
+              </button>
+            )}
+            {!isHost && (
+              <button className="danger" onClick={leaveRoom} title="Exit room">
+                <LogOut size={18} />
               </button>
             )}
           </div>
@@ -739,6 +796,11 @@ function App() {
                 {person.host && <em>host</em>}
                 {person.audio ? <Mic size={14} /> : <MicOff size={14} />}
                 {person.video ? <Camera size={14} /> : <CameraOff size={14} />}
+                {isHost && !person.host && (
+                  <button className="kick" onClick={() => kickPerson(person)} title={`Remove ${person.name}`}>
+                    <UserX size={14} />
+                  </button>
+                )}
               </div>
             ))}
           </div>

@@ -147,6 +147,29 @@ function scheduleEmptyRoomCleanup(roomCode) {
   }, 5000));
 }
 
+function removePersonFromRoom(socketId, roomCode, reason = "left") {
+  const room = rooms.get(roomCode);
+  if (!room?.people.has(socketId)) return;
+
+  const wasHost = room.hostId === socketId;
+  room.people.delete(socketId);
+
+  if (wasHost) {
+    const next = room.people.keys().next().value;
+    room.hostId = next || null;
+    if (next) {
+      const person = room.people.get(next);
+      room.people.set(next, { ...person, host: true });
+    }
+  }
+
+  io.to(socketId).emit("room:left", { reason });
+  io.in(socketId).socketsLeave(roomCode);
+
+  if (room.people.size === 0) scheduleEmptyRoomCleanup(roomCode);
+  else io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+}
+
 function ensureRoom(roomCode, hostId) {
   if (!rooms.has(roomCode)) {
     rooms.set(roomCode, {
@@ -235,6 +258,16 @@ io.on("connection", (socket) => {
     await endRoom(roomCode, "host-ended");
   });
 
+  socket.on("room:leave", ({ roomCode }) => {
+    removePersonFromRoom(socket.id, roomCode, "left");
+  });
+
+  socket.on("room:kick", ({ roomCode, personId }) => {
+    const room = rooms.get(roomCode);
+    if (!room || room.hostId !== socket.id || personId === socket.id) return;
+    removePersonFromRoom(personId, roomCode, "kicked");
+  });
+
   socket.on("chat:send", ({ roomCode, message }) => {
     const room = rooms.get(roomCode);
     const person = room?.people.get(socket.id);
@@ -289,19 +322,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     for (const [roomCode, room] of rooms) {
-      if (!room.people.has(socket.id)) continue;
-      const wasHost = room.hostId === socket.id;
-      room.people.delete(socket.id);
-      if (wasHost) {
-        const next = room.people.keys().next().value;
-        room.hostId = next || null;
-        if (next) {
-          const person = room.people.get(next);
-          room.people.set(next, { ...person, host: true });
-        }
-      }
-      if (room.people.size === 0) scheduleEmptyRoomCleanup(roomCode);
-      else io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+      if (room.people.has(socket.id)) removePersonFromRoom(socket.id, roomCode, "disconnected");
     }
   });
 });

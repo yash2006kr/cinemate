@@ -465,10 +465,16 @@ h3 {
 
 .person {
   display: grid;
-  grid-template-columns: 32px 1fr auto auto auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto auto auto auto;
   align-items: center;
   gap: 8px;
   min-height: 40px;
+}
+
+.person strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .person span {
@@ -485,6 +491,21 @@ h3 {
   color: #ffb703;
   font-size: 12px;
   font-style: normal;
+}
+
+.person .kick {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: rgba(230, 57, 70, 0.18);
+  color: #fecaca;
+}
+
+.person .kick:hover {
+  background: #e63946;
+  color: #ffffff;
 }
 
 .call-grid {
