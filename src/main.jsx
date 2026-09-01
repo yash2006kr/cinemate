@@ -738,8 +738,8 @@ function App() {
       setRoom((current) => current ? { ...current, playback } : current);
       window.setTimeout(() => videoRef.current?.load(), 50);
       window.setTimeout(() => applyPlayback(playback), 250);
-    } catch {
-      alert("Movie upload failed. Try a smaller file or use screen share.");
+    } catch (error) {
+      alert(`Movie upload failed: ${error.message}`);
     } finally {
       setUploading(false);
       setUploadProgress(0);
@@ -749,12 +749,7 @@ function App() {
 
   async function uploadMovie(file) {
     if (isLocalhost) return uploadToLocalServer(file);
-    try {
-      return await uploadToR2(file);
-    } catch (error) {
-      if (!/not configured/i.test(error.message)) throw error;
-      return uploadToVercelBlob(file);
-    }
+    return uploadToR2(file);
   }
 
   async function uploadToLocalServer(file) {

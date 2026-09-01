@@ -135,6 +135,14 @@ R2_PUBLIC_URL=https://your-public-r2-bucket-url
 
 Add the same R2 variables in **Render > cinemate-server > Environment** so the server can delete uploaded movies after rooms end.
 
+After redeploying Vercel, test the R2 configuration by opening:
+
+```text
+https://your-vercel-app.vercel.app/api/r2/status
+```
+
+It should return `"ok": true`. If it lists missing variables, add those variables in Vercel and redeploy again.
+
 Set this CORS policy on the R2 bucket so browser uploads work:
 
 ```json
