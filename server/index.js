@@ -398,6 +398,10 @@ process.on("SIGINT", () => {
 });
 
 const port = process.env.PORT || 3001;
-server.listen(port, () => {
-  console.log(`Cinemate realtime server listening on http://localhost:${port}`);
+const host = process.env.HOST || "0.0.0.0";
+server.listen(port, host, () => {
+  console.log(`Cinemate realtime server listening on ${host}:${port}`);
+  if (process.env.RENDER_EXTERNAL_URL) {
+    console.log(`Public URL: ${process.env.RENDER_EXTERNAL_URL}`);
+  }
 });

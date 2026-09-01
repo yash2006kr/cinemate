@@ -21,6 +21,7 @@ import {
   Play,
   Radio,
   RotateCcw,
+  RotateCw,
   Send,
   Sparkles,
   Subtitles,
@@ -29,7 +30,6 @@ import {
   UserX,
   Users,
   Volume2,
-  Wand2
 } from "lucide-react";
 import "./styles.css";
 
@@ -94,6 +94,15 @@ function VideoTile({ stream, name, muted = false, onPlaybackBlocked }) {
   );
 }
 
+function CallPlaceholder({ person }) {
+  return (
+    <div className="video-tile placeholder">
+      <CameraOff size={22} />
+      <span>{person.name}</span>
+    </div>
+  );
+}
+
 function App() {
   const [name, setName] = useState(localStorage.getItem("cinemate:name") || "");
   const [joinCode, setJoinCode] = useState("");
@@ -141,6 +150,8 @@ function App() {
     stream,
     name: people.find((person) => person.id === peerId)?.name || "Friend"
   }));
+  const remoteMediaIds = new Set(remoteMediaList.map((item) => item.peerId));
+  const missingMediaPeople = people.filter((person) => person.id !== socket.id && !remoteMediaIds.has(person.id));
 
   useEffect(() => {
     roomRef.current = room;
@@ -483,6 +494,9 @@ function App() {
     if (existing && existing.connectionState !== "closed") return existing;
 
     const pc = new RTCPeerConnection(rtcConfig);
+    pc._makingOffer = false;
+    pc._ignoreOffer = false;
+    pc._polite = socket.id > peerId;
     peerConnections.current.set(key, pc);
 
     pc.onicecandidate = (event) => {
@@ -498,6 +512,19 @@ function App() {
           delete next[peerId];
           return next;
         });
+      }
+    };
+
+    pc.onnegotiationneeded = async () => {
+      if (channel !== "call") return;
+      try {
+        pc._makingOffer = true;
+        await pc.setLocalDescription(await pc.createOffer());
+        emitSignal("webrtc:offer", peerId, channel, { description: pc.localDescription });
+      } catch {
+        closePeer(channel, peerId);
+      } finally {
+        pc._makingOffer = false;
       }
     };
 
@@ -524,13 +551,27 @@ function App() {
   async function makeOffer(channel, peerId) {
     const pc = createPeer(channel, peerId);
     if (channel === "call") await syncCallTracks(pc);
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    emitSignal("webrtc:offer", peerId, channel, { description: pc.localDescription });
+    if (pc.signalingState !== "stable" || pc._makingOffer) return;
+    pc._makingOffer = true;
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      emitSignal("webrtc:offer", peerId, channel, { description: pc.localDescription });
+    } finally {
+      pc._makingOffer = false;
+    }
   }
 
   async function handleOffer({ from, channel, description }) {
     const pc = createPeer(channel, from);
+    const offerCollision = description.type === "offer" && (pc._makingOffer || pc.signalingState !== "stable");
+    pc._ignoreOffer = !pc._polite && offerCollision;
+    if (pc._ignoreOffer) return;
+
+    if (offerCollision) {
+      await pc.setLocalDescription({ type: "rollback" });
+    }
+
     await pc.setRemoteDescription(description);
     if (channel === "call") await syncCallTracks(pc);
     await flushIce(channel, from);
@@ -542,6 +583,7 @@ function App() {
   async function handleAnswer({ from, channel, description }) {
     const pc = peerConnections.current.get(peerKey(channel, from));
     if (!pc) return;
+    if (pc.signalingState === "stable") return;
     await pc.setRemoteDescription(description);
     await flushIce(channel, from);
   }
@@ -549,6 +591,7 @@ function App() {
   async function handleIce({ from, channel, candidate }) {
     const key = peerKey(channel, from);
     const pc = peerConnections.current.get(key);
+    if (pc?._ignoreOffer) return;
     if (!pc?.remoteDescription) {
       pendingIce.current.set(key, [...(pendingIce.current.get(key) || []), candidate]);
       return;
@@ -575,7 +618,7 @@ function App() {
     }
 
     for (const person of others) {
-      if (localMediaRef.current && socket.id < person.id && !peerConnections.current.has(peerKey("call", person.id))) {
+      if (localMediaRef.current && !peerConnections.current.has(peerKey("call", person.id))) {
         makeOffer("call", person.id).catch(() => {});
       }
       if (snapshot.hostId === socket.id && movieStreamRef.current) {
@@ -915,8 +958,8 @@ function App() {
             <button onClick={toggleFullscreen} title="Fullscreen">
               <Expand size={18} />
             </button>
-            <button onClick={() => sendReaction("❤️")} title="Send love">
-              <Wand2 size={18} />
+            <button onClick={() => jump(10)} title="Forward 10 seconds">
+              <RotateCw size={18} />
             </button>
           </div>
 
@@ -1044,6 +1087,9 @@ function App() {
                 name={item.name}
                 onPlaybackBlocked={() => setNeedsPlaybackGesture(true)}
               />
+            ))}
+            {missingMediaPeople.map((person) => (
+              <CallPlaceholder key={person.id} person={person} />
             ))}
           </div>
 

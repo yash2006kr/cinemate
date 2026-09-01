@@ -337,21 +337,28 @@ input {
   right: 14px;
   bottom: 14px;
   display: flex;
-  gap: 8px;
-  padding: 8px;
+  gap: 6px;
+  padding: 6px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.52);
+  background: rgba(0, 0, 0, 0.28);
   backdrop-filter: blur(18px);
+  opacity: 0.78;
+  transition: opacity 160ms ease;
+}
+
+.hud:hover,
+.hud:focus-within {
+  opacity: 1;
 }
 
 .hud button {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.13);
+  background: rgba(255, 255, 255, 0.09);
   color: #ffffff;
 }
 
@@ -603,6 +610,12 @@ h3 {
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: #111827;
+}
+
+.video-tile.placeholder {
+  display: grid;
+  place-items: center;
+  color: #94a3b8;
 }
 
 .video-tile video {
