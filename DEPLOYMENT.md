@@ -87,10 +87,15 @@ PORT=3001
 
 On Render, do not create `PORT` manually. Render provides it automatically.
 
-Add this environment variable to Render too, so the realtime server can delete uploaded Blob movies when rooms end or everyone leaves:
+Add these environment variables to Render too, so the realtime server can delete uploaded movies when rooms end or everyone leaves:
 
 ```bash
 BLOB_READ_WRITE_TOKEN=your_vercel_blob_read_write_token
+R2_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=your_r2_access_key_id
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key
+R2_BUCKET=cinemate-movies
+R2_PUBLIC_URL=https://your-public-r2-bucket-url
 ```
 
 You can copy the value from Vercel:
@@ -100,6 +105,54 @@ You can copy the value from Vercel:
 3. Open **Environment Variables**.
 4. Find `BLOB_READ_WRITE_TOKEN`.
 5. Copy it into Render.
+
+## Cloudflare R2 Movie Storage
+
+Use Cloudflare R2 for real movie uploads. Vercel Blob Hobby can hit operation limits quickly with large watch-party testing.
+
+1. Open Cloudflare Dashboard.
+2. Go to **R2 Object Storage**.
+3. Click **Create bucket**.
+4. Name it `cinemate-movies`.
+5. Keep the default location/storage settings and create it.
+6. Open the bucket.
+7. Go to **Settings**.
+8. Enable a public bucket URL. Cloudflare may call this **Public Development URL** or public access. Copy the public URL.
+9. Go to **Manage API Tokens** for R2.
+10. Create an API token with **Object Read & Write** permission for only the `cinemate-movies` bucket.
+11. Copy the **Access Key ID** and **Secret Access Key** immediately.
+12. Find your Cloudflare **Account ID** from the R2 overview or dashboard sidebar.
+
+Add these environment variables in **Vercel > cinemate > Settings > Environment Variables** for Production and Preview:
+
+```bash
+R2_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=your_r2_access_key_id
+R2_SECRET_ACCESS_KEY=your_r2_secret_access_key
+R2_BUCKET=cinemate-movies
+R2_PUBLIC_URL=https://your-public-r2-bucket-url
+```
+
+Add the same R2 variables in **Render > cinemate-server > Environment** so the server can delete uploaded movies after rooms end.
+
+Set this CORS policy on the R2 bucket so browser uploads work:
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "https://your-vercel-app.vercel.app",
+      "http://localhost:5173"
+    ],
+    "AllowedMethods": ["GET", "PUT", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Replace `https://your-vercel-app.vercel.app` with your actual Cinemate Vercel URL.
 
 ## Cleanup Uploaded Movies
 
@@ -135,17 +188,17 @@ You can also delete old files from Vercel:
 
 ## 1GB+ Movie Uploads
 
-Yes, 1GB+ uploads are possible with Vercel Blob client uploads.
+Use Cloudflare R2 for 1GB+ movie uploads.
 
 Use these rules:
 
 - Prefer `.mp4` with H.264 video and AAC audio.
 - Avoid `.mkv` for now; many browsers cannot play MKV directly.
-- Keep the Blob store **Public** for simple browser playback.
+- Keep the R2 bucket public for simple browser playback.
 - Use a strong connection before uploading big files.
 - Test with a 50-100MB MP4 before trying a full 1GB+ movie.
 
-Large uploads go directly from the browser to Vercel Blob using multipart upload, so they do not pass through the Vercel Function body limit.
+Large uploads go directly from the browser to Cloudflare R2 using a temporary signed upload URL, so they do not pass through the Vercel Function body limit.
 
 ## First Production Test
 

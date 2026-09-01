@@ -12,6 +12,8 @@
     "preview": "vite preview --host 0.0.0.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1121.0",
+    "@aws-sdk/s3-request-presigner": "^3.1121.0",
     "@vercel/blob": "^2.8.0",
     "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^9.2.1",

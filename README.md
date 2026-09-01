@@ -23,7 +23,7 @@ Open `http://localhost:5173`.
 
 ## Deploy
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the full Vercel + Blob setup.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full Vercel + Render + Cloudflare R2 setup.
 
 ## Roadmap
 

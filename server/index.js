@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { Server } from "socket.io";
+import { deleteR2Object } from "./r2.js";
 
 const app = express();
 const server = createServer(app);
@@ -107,6 +108,7 @@ function resetPlayback() {
     mediaUrl: null,
     pathname: null,
     localPath: null,
+    r2Key: null,
     source: null
   };
 }
@@ -125,6 +127,12 @@ async function deleteRoomMovie(room) {
 
   if (playback?.localPath) {
     await unlink(playback.localPath).catch(() => {});
+  }
+
+  if (playback?.r2Key) {
+    await deleteR2Object(playback.r2Key).catch((error) => {
+      console.warn("R2 cleanup failed:", error.message);
+    });
   }
 }
 

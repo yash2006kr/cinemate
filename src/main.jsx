@@ -734,9 +734,7 @@ function App() {
     setRemoteMovieStream(null);
     setScreenStream(null);
     try {
-      const playback = isLocalhost
-        ? await uploadToLocalServer(file)
-        : await uploadToVercelBlob(file);
+      const playback = await uploadMovie(file);
       setRoom((current) => current ? { ...current, playback } : current);
       window.setTimeout(() => videoRef.current?.load(), 50);
       window.setTimeout(() => applyPlayback(playback), 250);
@@ -746,6 +744,16 @@ function App() {
       setUploading(false);
       setUploadProgress(0);
       event.target.value = "";
+    }
+  }
+
+  async function uploadMovie(file) {
+    if (isLocalhost) return uploadToLocalServer(file);
+    try {
+      return await uploadToR2(file);
+    } catch (error) {
+      if (!/not configured/i.test(error.message)) throw error;
+      return uploadToVercelBlob(file);
     }
   }
 
@@ -759,6 +767,60 @@ function App() {
     if (!response.ok) throw new Error("Upload failed");
     const playback = await response.json();
     return playback;
+  }
+
+  async function uploadToR2(file) {
+    const response = await fetch("/api/r2/presign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        roomCode: room.code,
+        fileName: file.name,
+        contentType: file.type || "application/octet-stream",
+        size: file.size
+      })
+    });
+
+    const signed = await response.json();
+    if (!response.ok) throw new Error(signed.error || "Cloudflare R2 is not configured.");
+
+    await uploadFileWithProgress(signed.uploadUrl, file);
+
+    const playback = {
+      paused: true,
+      currentTime: 0,
+      updatedAt: Date.now(),
+      title: file.name,
+      mediaUrl: signed.mediaUrl,
+      pathname: null,
+      r2Key: signed.key,
+      source: "r2"
+    };
+
+    socket.emit("playback:update", {
+      roomCode: room.code,
+      playback
+    });
+
+    return playback;
+  }
+
+  function uploadFileWithProgress(uploadUrl, file) {
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open("PUT", uploadUrl);
+      request.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+      request.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        setUploadProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      request.onload = () => {
+        if (request.status >= 200 && request.status < 300) resolve();
+        else reject(new Error(`R2 upload failed with status ${request.status}`));
+      };
+      request.onerror = () => reject(new Error("R2 upload failed. Check bucket CORS settings."));
+      request.send(file);
+    });
   }
 
   async function uploadToVercelBlob(file) {
@@ -783,6 +845,7 @@ function App() {
       title: file.name,
       mediaUrl: blob.url,
       pathname: blob.pathname,
+      r2Key: null,
       source: "blob"
     };
 
