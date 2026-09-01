@@ -13,12 +13,15 @@ const io = new Server(server, {
   cors: {
     origin: true,
     methods: ["GET", "POST"]
-  }
+  },
+  pingInterval: 25000,
+  pingTimeout: 60000
 });
 
 const rooms = new Map();
 const uploadsDir = join(process.cwd(), "uploads");
 const cleanupTimers = new Map();
+const disconnectTimers = new Map();
 
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 
@@ -147,10 +150,43 @@ function scheduleEmptyRoomCleanup(roomCode) {
   }, 5000));
 }
 
+function clearDisconnectTimer(socketId) {
+  if (!disconnectTimers.has(socketId)) return;
+  clearTimeout(disconnectTimers.get(socketId));
+  disconnectTimers.delete(socketId);
+}
+
+function findPersonByClientId(room, clientId) {
+  if (!clientId) return null;
+  for (const [socketId, person] of room.people) {
+    if (person.clientId === clientId) return { socketId, person };
+  }
+  return null;
+}
+
+function reclaimClientSeat(room, nextSocketId, clientId) {
+  const existing = findPersonByClientId(room, clientId);
+  if (!existing || existing.socketId === nextSocketId) return { wasHost: false, previous: null };
+
+  clearDisconnectTimer(existing.socketId);
+  room.people.delete(existing.socketId);
+  const oldSocket = io.sockets.sockets.get(existing.socketId);
+  if (oldSocket) {
+    for (const joinedRoom of oldSocket.rooms) {
+      if (joinedRoom !== oldSocket.id) oldSocket.leave(joinedRoom);
+    }
+  }
+
+  const wasHost = room.hostId === existing.socketId || existing.person.host;
+  if (wasHost) room.hostId = nextSocketId;
+  return { wasHost, previous: existing.person };
+}
+
 function removePersonFromRoom(socketId, roomCode, reason = "left") {
   const room = rooms.get(roomCode);
   if (!room?.people.has(socketId)) return;
 
+  clearDisconnectTimer(socketId);
   const leavingPerson = room.people.get(socketId);
   const wasHost = room.hostId === socketId;
   room.people.delete(socketId);
@@ -192,7 +228,7 @@ function ensureRoom(roomCode, hostId) {
 }
 
 io.on("connection", (socket) => {
-  socket.on("room:create", ({ name }, reply) => {
+  socket.on("room:create", ({ name, clientId }, reply) => {
     const roomCode = code();
     const room = ensureRoom(roomCode, socket.id);
     if (cleanupTimers.has(roomCode)) {
@@ -201,6 +237,7 @@ io.on("connection", (socket) => {
     }
     room.people.set(socket.id, {
       id: socket.id,
+      clientId,
       name: name || "Host",
       avatar: (name || "H").slice(0, 1).toUpperCase(),
       audio: false,
@@ -212,20 +249,23 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
   });
 
-  socket.on("room:join", ({ roomCode, name }, reply) => {
+  socket.on("room:join", ({ roomCode, name, clientId }, reply) => {
     const normalized = String(roomCode || "").trim().toUpperCase();
     const room = rooms.get(normalized);
     if (!room) {
       reply?.({ error: "Room not found" });
       return;
     }
+    const { wasHost, previous } = reclaimClientSeat(room, socket.id, clientId);
+    const host = wasHost || socket.id === room.hostId;
     room.people.set(socket.id, {
       id: socket.id,
-      name: name || "Friend",
-      avatar: (name || "F").slice(0, 1).toUpperCase(),
-      audio: false,
-      video: false,
-      host: socket.id === room.hostId
+      clientId,
+      name: name || previous?.name || "Friend",
+      avatar: (name || previous?.name || "F").slice(0, 1).toUpperCase(),
+      audio: previous?.audio || false,
+      video: previous?.video || false,
+      host
     });
     socket.join(normalized);
     if (cleanupTimers.has(normalized)) {
@@ -233,10 +273,12 @@ io.on("connection", (socket) => {
       cleanupTimers.delete(normalized);
     }
     reply?.(roomSnapshot(normalized));
-    socket.to(normalized).emit("presence:joined", {
-      id: socket.id,
-      name: name || "Friend"
-    });
+    if (!previous) {
+      socket.to(normalized).emit("presence:joined", {
+        id: socket.id,
+        name: name || "Friend"
+      });
+    }
     io.to(normalized).emit("room:update", roomSnapshot(normalized));
   });
 
@@ -334,7 +376,11 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     for (const [roomCode, room] of rooms) {
-      if (room.people.has(socket.id)) removePersonFromRoom(socket.id, roomCode, "disconnected");
+      if (!room.people.has(socket.id)) continue;
+      clearDisconnectTimer(socket.id);
+      disconnectTimers.set(socket.id, setTimeout(() => {
+        removePersonFromRoom(socket.id, roomCode, "disconnected");
+      }, 20000));
     }
   });
 });

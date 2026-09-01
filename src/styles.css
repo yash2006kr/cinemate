@@ -355,6 +355,63 @@ input {
   color: #ffffff;
 }
 
+.theater-chat-toggle {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.52);
+  color: #ffffff;
+  backdrop-filter: blur(18px);
+}
+
+.theater-chat {
+  position: absolute;
+  left: 66px;
+  right: 84px;
+  bottom: 14px;
+  z-index: 3;
+  display: grid;
+  gap: 6px;
+  max-width: 760px;
+  pointer-events: none;
+}
+
+.theater-chat p {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.44);
+  color: #f8fafc;
+  backdrop-filter: blur(16px);
+}
+
+.theater-chat strong {
+  flex: 0 0 auto;
+  color: #fbbf24;
+  font-size: 12px;
+}
+
+.theater-chat span {
+  overflow: hidden;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .float-layer span {
   position: absolute;
   bottom: 12%;
@@ -578,7 +635,17 @@ h3 {
 }
 
 .reactions button {
+  display: grid;
+  place-items: center;
+  gap: 1px;
+  min-height: 48px;
   font-size: 20px;
+}
+
+.reactions small {
+  color: #94a3b8;
+  font-size: 10px;
+  font-weight: 900;
 }
 
 .subtitle-button {

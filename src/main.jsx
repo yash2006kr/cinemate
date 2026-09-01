@@ -25,6 +25,7 @@ import {
   Sparkles,
   Subtitles,
   Upload,
+  X,
   UserX,
   Users,
   Volume2,
@@ -36,23 +37,47 @@ const isLocalhost = ["localhost", "127.0.0.1"].includes(window.location.hostname
 const serverUrl = import.meta.env.VITE_SIGNALING_URL || (
   isLocalhost ? "http://localhost:3001" : window.location.origin
 );
-const socket = io(serverUrl, { autoConnect: true });
-const reactions = ["🔥", "😂", "😱", "😭", "👏", "🍿", "🤯", "❤️"];
-const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+const socket = io(serverUrl, { autoConnect: true, reconnection: true, reconnectionAttempts: Infinity });
+const clientId = localStorage.getItem("cinemate:clientId") || crypto.randomUUID();
+localStorage.setItem("cinemate:clientId", clientId);
+const reactions = [
+  { emoji: "😂", key: "L", label: "Laugh" },
+  { emoji: "❤️", key: "H", label: "Love" },
+  { emoji: "😘", key: "K", label: "Kiss" },
+  { emoji: "🔥", key: "F", label: "Fire" },
+  { emoji: "😱", key: "S", label: "Shock" },
+  { emoji: "😭", key: "C", label: "Cry" },
+  { emoji: "🤯", key: "M", label: "Mind" },
+  { emoji: "👀", key: "E", label: "Eyes" }
+];
+const turnServer = import.meta.env.VITE_TURN_URL
+  ? {
+      urls: import.meta.env.VITE_TURN_URL,
+      username: import.meta.env.VITE_TURN_USERNAME,
+      credential: import.meta.env.VITE_TURN_CREDENTIAL
+    }
+  : null;
+const rtcConfig = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    ...(turnServer ? [turnServer] : [])
+  ],
+  iceCandidatePoolSize: 4
+};
 
 function syncTime(playback) {
   if (playback.paused) return playback.currentTime;
   return playback.currentTime + (Date.now() - playback.updatedAt) / 1000;
 }
 
-function VideoTile({ stream, name, muted = false }) {
+function VideoTile({ stream, name, muted = false, onPlaybackBlocked }) {
   const ref = useRef(null);
 
   useEffect(() => {
     if (!ref.current) return;
     ref.current.srcObject = stream;
-    ref.current.play().catch(() => {});
-  }, [stream]);
+    ref.current.play().catch(() => onPlaybackBlocked?.());
+  }, [stream, onPlaybackBlocked]);
 
   return (
     <div className="video-tile">
@@ -62,7 +87,7 @@ function VideoTile({ stream, name, muted = false }) {
         playsInline
         webkit-playsinline="true"
         muted={muted}
-        onLoadedMetadata={() => ref.current?.play().catch(() => {})}
+        onLoadedMetadata={() => ref.current?.play().catch(() => onPlaybackBlocked?.())}
       />
       <span>{name}</span>
     </div>
@@ -90,9 +115,11 @@ function App() {
   const [connectionState, setConnectionState] = useState(socket.connected ? "connected" : "connecting");
   const [needsPlaybackGesture, setNeedsPlaybackGesture] = useState(false);
   const [playerWarning, setPlayerWarning] = useState("");
+  const [fullscreenChatHidden, setFullscreenChatHidden] = useState(false);
   const videoRef = useRef(null);
   const remoteMovieRef = useRef(null);
   const theaterRef = useRef(null);
+  const chatInputRef = useRef(null);
   const syncing = useRef(false);
   const peerConnections = useRef(new Map());
   const pendingIce = useRef(new Map());
@@ -101,12 +128,14 @@ function App() {
   const movieStreamRef = useRef(null);
   const localMediaRef = useRef(null);
   const roomRef = useRef(null);
+  const deviceRef = useRef(device);
   const autoJoinAttempted = useRef(false);
 
   const isHost = room?.hostId === socket.id;
   const invite = room ? `${window.location.origin}?room=${room.code}` : "";
   const movieUrl = room?.playback?.mediaUrl || localUrl;
   const people = useMemo(() => room?.people || [], [room]);
+  const recentMessages = messages.slice(-3);
   const remoteMediaList = Object.entries(remoteMedia).map(([peerId, stream]) => ({
     peerId,
     stream,
@@ -116,6 +145,10 @@ function App() {
   useEffect(() => {
     roomRef.current = room;
   }, [room]);
+
+  useEffect(() => {
+    deviceRef.current = device;
+  }, [device]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -130,7 +163,7 @@ function App() {
   useEffect(() => {
     if (!linkRoomCode || room || autoJoinAttempted.current) return;
     autoJoinAttempted.current = true;
-    socket.emit("room:join", { roomCode: linkRoomCode, name: rememberName() }, (snapshot) => {
+    socket.emit("room:join", { roomCode: linkRoomCode, name: rememberName(), clientId }, (snapshot) => {
       if (snapshot?.error) {
         autoJoinAttempted.current = false;
         alert(snapshot.error);
@@ -146,7 +179,20 @@ function App() {
       setRoom(snapshot);
       reconcilePeers(snapshot);
     });
-    socket.on("connect", () => setConnectionState("connected"));
+    socket.on("connect", () => {
+      setConnectionState("connected");
+      const activeRoom = roomRef.current;
+      if (!activeRoom) return;
+      socket.emit("room:join", { roomCode: activeRoom.code, name: rememberName(), clientId }, (snapshot) => {
+        if (snapshot?.error) return;
+        setRoom(snapshot);
+        reconcilePeers(snapshot);
+        const activeDevice = deviceRef.current;
+        if (activeDevice.audio || activeDevice.video) {
+          socket.emit("presence:update", { roomCode: snapshot.code, patch: activeDevice });
+        }
+      });
+    });
     socket.on("disconnect", () => setConnectionState("disconnected"));
     socket.on("connect_error", () => setConnectionState("disconnected"));
     socket.on("room:ended", () => {
@@ -214,6 +260,26 @@ function App() {
     window.setTimeout(() => applyPlayback(room.playback), 150);
   }, [movieUrl, room?.playback?.mediaUrl]);
 
+  useEffect(() => {
+    function handleHotkeys(event) {
+      const tagName = document.activeElement?.tagName?.toLowerCase();
+      const isTyping = ["input", "textarea", "select"].includes(tagName) || document.activeElement?.isContentEditable;
+      if (isTyping || event.ctrlKey || event.metaKey || event.altKey || !roomRef.current) return;
+      if (event.key.toLowerCase() === "t") {
+        event.preventDefault();
+        setFullscreenChatHidden((current) => !current);
+        return;
+      }
+      const match = reactions.find((reaction) => reaction.key.toLowerCase() === event.key.toLowerCase());
+      if (!match) return;
+      event.preventDefault();
+      sendReaction(match.emoji);
+    }
+
+    window.addEventListener("keydown", handleHotkeys);
+    return () => window.removeEventListener("keydown", handleHotkeys);
+  }, []);
+
   function rememberName() {
     const clean = name.trim() || "Movie Buddy";
     localStorage.setItem("cinemate:name", clean);
@@ -247,6 +313,12 @@ function App() {
     ]);
   }
 
+  function sendReaction(reaction) {
+    const activeRoom = roomRef.current;
+    if (!activeRoom) return;
+    socket.emit("reaction:send", { roomCode: activeRoom.code, reaction });
+  }
+
   function playPresenceTone(type) {
     try {
       const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -271,14 +343,14 @@ function App() {
   }
 
   function createRoom() {
-    socket.emit("room:create", { name: rememberName() }, (snapshot) => {
+    socket.emit("room:create", { name: rememberName(), clientId }, (snapshot) => {
       setRoom(snapshot);
       reconcilePeers(snapshot);
     });
   }
 
   function joinRoom() {
-    socket.emit("room:join", { roomCode: joinCode, name: rememberName() }, (snapshot) => {
+    socket.emit("room:join", { roomCode: joinCode, name: rememberName(), clientId }, (snapshot) => {
       if (snapshot?.error) alert(snapshot.error);
       else {
         setRoom(snapshot);
@@ -698,6 +770,9 @@ function App() {
   }
 
   function unlockPlayback() {
+    document.querySelectorAll("video").forEach((player) => {
+      player.play().catch(() => {});
+    });
     attemptPlay(videoRef.current || remoteMovieRef.current);
   }
 
@@ -840,10 +915,29 @@ function App() {
             <button onClick={toggleFullscreen} title="Fullscreen">
               <Expand size={18} />
             </button>
-            <button onClick={() => socket.emit("reaction:send", { roomCode: room.code, reaction: "🍿" })}>
+            <button onClick={() => sendReaction("❤️")} title="Send love">
               <Wand2 size={18} />
             </button>
           </div>
+
+          <button
+            className="theater-chat-toggle"
+            onClick={() => setFullscreenChatHidden((current) => !current)}
+            title="Toggle fullscreen chat (T)"
+          >
+            {fullscreenChatHidden ? <MessageCircle size={18} /> : <X size={18} />}
+          </button>
+
+          {!fullscreenChatHidden && recentMessages.length > 0 && (
+            <div className="theater-chat">
+              {recentMessages.map((item) => (
+                <p key={item.id}>
+                  <strong>{item.name}</strong>
+                  <span>{item.message}</span>
+                </p>
+              ))}
+            </div>
+          )}
 
           <div className="float-layer">
             {floating.map((item) => (
@@ -944,17 +1038,24 @@ function App() {
           <div className="call-grid">
             {localMediaStream && <VideoTile stream={localMediaStream} name="You" muted />}
             {remoteMediaList.map((item) => (
-              <VideoTile key={item.peerId} stream={item.stream} name={item.name} />
+              <VideoTile
+                key={item.peerId}
+                stream={item.stream}
+                name={item.name}
+                onPlaybackBlocked={() => setNeedsPlaybackGesture(true)}
+              />
             ))}
           </div>
 
           <div className="reactions">
             {reactions.map((reaction) => (
               <button
-                key={reaction}
-                onClick={() => socket.emit("reaction:send", { roomCode: room.code, reaction })}
+                key={reaction.emoji}
+                onClick={() => sendReaction(reaction.emoji)}
+                title={`${reaction.label} (${reaction.key})`}
               >
-                {reaction}
+                <span>{reaction.emoji}</span>
+                <small>{reaction.key}</small>
               </button>
             ))}
           </div>
@@ -981,7 +1082,7 @@ function App() {
           ))}
         </div>
         <form onSubmit={sendChat}>
-          <input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Say something..." />
+          <input ref={chatInputRef} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Say something..." />
           <button>
             <Send size={18} />
           </button>
