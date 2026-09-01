@@ -26,6 +26,7 @@ import {
   Sparkles,
   Subtitles,
   Upload,
+  RefreshCw,
   X,
   UserX,
   Users,
@@ -72,11 +73,17 @@ function syncTime(playback) {
 
 function VideoTile({ stream, name, muted = false, onPlaybackBlocked }) {
   const ref = useRef(null);
+  const audioRef = useRef(null);
 
   useEffect(() => {
-    if (!ref.current) return;
-    ref.current.srcObject = stream;
-    ref.current.play().catch(() => onPlaybackBlocked?.());
+    if (ref.current) {
+      ref.current.srcObject = stream;
+      ref.current.play().catch(() => onPlaybackBlocked?.());
+    }
+    if (audioRef.current) {
+      audioRef.current.srcObject = stream;
+      audioRef.current.play().catch(() => onPlaybackBlocked?.());
+    }
   }, [stream, onPlaybackBlocked]);
 
   return (
@@ -86,9 +93,16 @@ function VideoTile({ stream, name, muted = false, onPlaybackBlocked }) {
         autoPlay
         playsInline
         webkit-playsinline="true"
-        muted={muted}
+        muted
         onLoadedMetadata={() => ref.current?.play().catch(() => onPlaybackBlocked?.())}
       />
+      {!muted && (
+        <audio
+          ref={audioRef}
+          autoPlay
+          onLoadedMetadata={() => audioRef.current?.play().catch(() => onPlaybackBlocked?.())}
+        />
+      )}
       <span>{name}</span>
     </div>
   );
@@ -125,6 +139,7 @@ function App() {
   const [needsPlaybackGesture, setNeedsPlaybackGesture] = useState(false);
   const [playerWarning, setPlayerWarning] = useState("");
   const [fullscreenChatHidden, setFullscreenChatHidden] = useState(false);
+  const [movieLoadWarning, setMovieLoadWarning] = useState(false);
   const videoRef = useRef(null);
   const remoteMovieRef = useRef(null);
   const theaterRef = useRef(null);
@@ -272,6 +287,15 @@ function App() {
   }, [movieUrl, room?.playback?.mediaUrl]);
 
   useEffect(() => {
+    function handleFullscreenChange() {
+      setTheaterMode(document.fullscreenElement === theaterRef.current);
+    }
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  }, []);
+
+  useEffect(() => {
     function handleHotkeys(event) {
       const tagName = document.activeElement?.tagName?.toLowerCase();
       const isTyping = ["input", "textarea", "select"].includes(tagName) || document.activeElement?.isContentEditable;
@@ -284,11 +308,12 @@ function App() {
       const match = reactions.find((reaction) => reaction.key.toLowerCase() === event.key.toLowerCase());
       if (!match) return;
       event.preventDefault();
+      event.stopPropagation();
       sendReaction(match.emoji);
     }
 
-    window.addEventListener("keydown", handleHotkeys);
-    return () => window.removeEventListener("keydown", handleHotkeys);
+    window.addEventListener("keydown", handleHotkeys, true);
+    return () => window.removeEventListener("keydown", handleHotkeys, true);
   }, []);
 
   function rememberName() {
@@ -401,15 +426,37 @@ function App() {
     const player = videoRef.current;
     if (!player) return;
     if (player.videoWidth === 0 && player.readyState > 0) {
-      setPlayerWarning("This file has audio, but the browser cannot decode its video track. Use MP4 H.264 video with AAC audio for everyone to see it.");
+      setMovieLoadWarning(true);
       return;
     }
+    setMovieLoadWarning(false);
     setPlayerWarning("");
     applyPlayback(roomRef.current?.playback);
   }
 
   function handleMovieError() {
+    const player = videoRef.current;
+    if (player?.currentTime > 1 || player?.readyState >= 2) {
+      setMovieLoadWarning(false);
+      setPlayerWarning("");
+      return;
+    }
+    setMovieLoadWarning(true);
+  }
+
+  function showMovieWarning() {
     setPlayerWarning("This browser could not load the movie video. Try MP4 H.264 + AAC, or use screen share for this file.");
+    setMovieLoadWarning(false);
+  }
+
+  function retryMovieLoad() {
+    const playback = roomRef.current?.playback;
+    const player = videoRef.current;
+    if (!player || !playback) return;
+    setMovieLoadWarning(false);
+    setPlayerWarning("");
+    player.load();
+    window.setTimeout(() => applyPlayback(playback), 250);
   }
 
   function applyPlayback(playback) {
@@ -504,7 +551,7 @@ function App() {
     };
 
     pc.onconnectionstatechange = () => {
-      if (!["failed", "disconnected", "closed"].includes(pc.connectionState)) return;
+      if (!["failed", "closed"].includes(pc.connectionState)) return;
       if (channel === "movie") setRemoteMovieStream(null);
       if (channel === "call") {
         setRemoteMedia((current) => {
@@ -512,19 +559,6 @@ function App() {
           delete next[peerId];
           return next;
         });
-      }
-    };
-
-    pc.onnegotiationneeded = async () => {
-      if (channel !== "call") return;
-      try {
-        pc._makingOffer = true;
-        await pc.setLocalDescription(await pc.createOffer());
-        emitSignal("webrtc:offer", peerId, channel, { description: pc.localDescription });
-      } catch {
-        closePeer(channel, peerId);
-      } finally {
-        pc._makingOffer = false;
       }
     };
 
@@ -779,6 +813,7 @@ function App() {
 
   function sendChat(event) {
     event.preventDefault();
+    if (!message.trim()) return;
     socket.emit("chat:send", { roomCode: room.code, message });
     setMessage("");
   }
@@ -813,7 +848,7 @@ function App() {
   }
 
   function unlockPlayback() {
-    document.querySelectorAll("video").forEach((player) => {
+    document.querySelectorAll("video, audio").forEach((player) => {
       player.play().catch(() => {});
     });
     attemptPlay(videoRef.current || remoteMovieRef.current);
@@ -916,7 +951,7 @@ function App() {
               ref={videoRef}
               className="movie"
               src={movieUrl}
-              controls
+              controls={!theaterMode}
               playsInline
               webkit-playsinline="true"
               preload="metadata"
@@ -925,7 +960,10 @@ function App() {
               onLoadedMetadata={handleMovieMetadata}
               onCanPlay={handleMovieMetadata}
               onError={handleMovieError}
-              onStalled={() => setPlayerWarning("The movie is buffering. Large files may take a moment to start on slower networks.")}
+              onPlaying={() => {
+                setMovieLoadWarning(false);
+                setPlayerWarning("");
+              }}
               onPlay={() => publishPlayback({ paused: false })}
               onPause={() => publishPlayback({ paused: true })}
               onSeeked={() => publishPlayback()}
@@ -982,6 +1020,19 @@ function App() {
             </div>
           )}
 
+          {!fullscreenChatHidden && theaterMode && (
+            <form className="theater-chat-form" onSubmit={sendChat}>
+              <input
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                placeholder="Chat without leaving fullscreen..."
+              />
+              <button title="Send chat">
+                <Send size={16} />
+              </button>
+            </form>
+          )}
+
           <div className="float-layer">
             {floating.map((item) => (
               <span key={item.id} style={{ left: `${item.x}%` }}>{item.reaction}</span>
@@ -1001,7 +1052,17 @@ function App() {
             <div className="player-warning">
               <strong>Video issue</strong>
               <span>{playerWarning}</span>
+              <div>
+                <button onClick={retryMovieLoad}>Retry</button>
+                <button onClick={() => setPlayerWarning("")}>Dismiss</button>
+              </div>
             </div>
+          )}
+
+          {movieLoadWarning && !playerWarning && (
+            <button className="player-warning-chip" onClick={showMovieWarning}>
+              Video issue
+            </button>
           )}
         </div>
 
@@ -1024,6 +1085,9 @@ function App() {
             </button>
             <button className={device.video ? "active" : ""} onClick={() => toggleDevice("video")} title="Toggle camera">
               {device.video ? <Camera size={18} /> : <CameraOff size={18} />}
+            </button>
+            <button onClick={restartCallLayer} title="Reconnect voice/video">
+              <RefreshCw size={18} />
             </button>
             <button onClick={toggleFullscreen} title="Fullscreen">
               <Maximize2 size={18} />

@@ -284,6 +284,7 @@ input {
   left: 16px;
   right: 16px;
   bottom: 16px;
+  z-index: 6;
   display: grid;
   gap: 4px;
   max-width: 760px;
@@ -302,6 +303,36 @@ input {
 .player-warning span {
   line-height: 1.45;
   color: #e2e8f0;
+}
+
+.player-warning div {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.player-warning button {
+  justify-self: start;
+  padding: 6px 10px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f8fafc;
+  font-size: 12px;
+}
+
+.player-warning-chip {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  z-index: 5;
+  padding: 7px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.44);
+  color: #fbbf24;
+  font-size: 12px;
+  font-weight: 900;
+  backdrop-filter: blur(12px);
 }
 
 .empty {
@@ -381,7 +412,7 @@ input {
   position: absolute;
   left: 66px;
   right: 84px;
-  bottom: 14px;
+  bottom: 66px;
   z-index: 3;
   display: grid;
   gap: 6px;
@@ -399,7 +430,7 @@ input {
   padding: 7px 10px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.44);
+  background: rgba(0, 0, 0, 0.18);
   color: #f8fafc;
   backdrop-filter: blur(16px);
 }
@@ -417,6 +448,48 @@ input {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.theater-chat-form {
+  position: absolute;
+  left: 66px;
+  right: 128px;
+  bottom: 14px;
+  z-index: 4;
+  display: none;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 7px;
+  max-width: 620px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(16px);
+}
+
+.theater:fullscreen .theater-chat-form,
+.cinema-focus .theater-chat-form {
+  display: grid;
+}
+
+.theater-chat-form input {
+  height: 36px;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  background: rgba(15, 23, 42, 0.36);
+  color: #f8fafc;
+  font-size: 13px;
+}
+
+.theater-chat-form button {
+  display: grid;
+  place-items: center;
+  height: 36px;
+  min-height: 36px;
+  border-radius: 7px;
+  background: rgba(251, 191, 36, 0.74);
+  color: #111827;
 }
 
 .float-layer span {
@@ -458,13 +531,13 @@ input {
 
 .toolbar {
   display: grid;
-  grid-template-columns: 1fr repeat(5, 42px);
+  grid-template-columns: 1fr repeat(6, 42px);
   gap: 8px;
   padding: 10px;
 }
 
 .toolbar.viewer-tools {
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
 }
 
 .toolbar .danger {
@@ -746,7 +819,7 @@ h3 {
   }
 
   .toolbar {
-    grid-template-columns: 1fr repeat(5, 42px);
+    grid-template-columns: 1fr repeat(6, 42px);
   }
 
   .theater,
