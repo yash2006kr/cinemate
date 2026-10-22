@@ -11,6 +11,7 @@ import {
   Expand,
   FileVideo,
   Link,
+  Languages,
   LogOut,
   Maximize2,
   MessageCircle,
@@ -140,7 +141,11 @@ function App() {
   const [playerWarning, setPlayerWarning] = useState("");
   const [fullscreenChatHidden, setFullscreenChatHidden] = useState(false);
   const [movieLoadWarning, setMovieLoadWarning] = useState(false);
+  const [availableAudioTracks, setAvailableAudioTracks] = useState([]);
+  const [audioTracksReady, setAudioTracksReady] = useState(false);
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState(0);
   const videoRef = useRef(null);
+  const hlsPlayerRef = useRef(null);
   const remoteMovieRef = useRef(null);
   const theaterRef = useRef(null);
   const chatInputRef = useRef(null);
@@ -157,7 +162,9 @@ function App() {
 
   const isHost = room?.hostId === socket.id;
   const invite = room ? `${window.location.origin}?room=${room.code}` : "";
-  const movieUrl = room?.playback?.mediaUrl || localUrl;
+  const movieUrl = room?.processing?.status === "processing" || (room?.processing?.status === "error" && !room.playback?.mediaUrl)
+    ? ""
+    : room?.playback?.mediaUrl || localUrl;
   const people = useMemo(() => room?.people || [], [room]);
   const recentMessages = messages.slice(-3);
   const remoteMediaList = Object.entries(remoteMedia).map(([peerId, stream]) => ({
@@ -247,7 +254,11 @@ function App() {
     socket.on("playback:sync", (playback) => {
       applyPlayback(playback);
     });
+    socket.on("audio-track:sync", (trackIndex) => {
+      changeAudioTrack(trackIndex, false);
+    });
     socket.on("movie:ready", (playback) => {
+      setRoom((current) => current ? { ...current, playback, processing: null } : current);
       setMovieSource(playback.source || "upload");
       setScreenStream(null);
       setRemoteMovieStream(null);
@@ -267,6 +278,7 @@ function App() {
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
+      socket.off("audio-track:sync");
       socket.off("movie:ready");
       socket.off("webrtc:offer");
       socket.off("webrtc:answer");
@@ -282,9 +294,103 @@ function App() {
   }, [remoteMovieStream]);
 
   useEffect(() => {
-    if (!movieUrl || !room?.playback) return;
+    const playback = room?.playback;
+    const video = videoRef.current;
+    if (!video || room?.processing?.status === "processing" || playback?.source !== "hls" || !playback.mediaUrl) {
+      setAudioTracksReady(false);
+      if (playback?.source !== "hls") setAvailableAudioTracks([]);
+      hlsPlayerRef.current?.destroy();
+      hlsPlayerRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    let hls = null;
+    let nativeTrackListener = null;
+    let hlsRecoveryAttempts = 0;
+    setAudioTracksReady(false);
+    setAvailableAudioTracks(playback.hlsTracks || []);
+    const applyTrackList = (tracks) => {
+      const options = tracks.map((track, index) => ({
+        index,
+        label: playback.hlsTracks?.[index]?.label || track.name || track.lang || `Audio ${index + 1}`,
+        language: track.lang || playback.hlsTracks?.[index]?.language || ""
+      }));
+      setAvailableAudioTracks(options);
+      setAudioTracksReady(options.length > 0 || (playback.hlsTracks || []).length === 0);
+      const savedIndex = Number(roomRef.current?.playback?.audioTrackIndex ?? playback.audioTrackIndex ?? 0);
+      if (options.length && savedIndex >= 0 && savedIndex < options.length) {
+        changeAudioTrack(savedIndex, false);
+      }
+    };
+
+    const attachNativeHls = () => {
+      if (!video.canPlayType("application/vnd.apple.mpegurl")) {
+        setPlayerWarning("This browser does not support HLS playback. Update your browser to play the prepared movie.");
+        return;
+      }
+      video.src = playback.mediaUrl;
+      nativeTrackListener = () => {
+        const nativeTracks = video.audioTracks;
+        if (!nativeTracks) {
+          setAvailableAudioTracks(playback.hlsTracks || []);
+          return;
+        }
+        applyTrackList(Array.from(nativeTracks, (track) => ({ name: track.label, lang: track.language })));
+      };
+      video.addEventListener("loadedmetadata", nativeTrackListener);
+      video.addEventListener("canplay", nativeTrackListener);
+    };
+
+    import("hls.js").then(({ default: Hls }) => {
+      if (cancelled) return;
+      if (!Hls.isSupported()) {
+        attachNativeHls();
+        return;
+      }
+      hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+      hlsPlayerRef.current = hls;
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => hls.loadSource(playback.mediaUrl));
+      hls.on(Hls.Events.MANIFEST_PARSED, () => applyTrackList(hls.audioTracks));
+      hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => applyTrackList(hls.audioTracks));
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (!data.fatal) return;
+        if (hlsRecoveryAttempts < 2 && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          hlsRecoveryAttempts += 1;
+          hls.startLoad();
+        } else if (hlsRecoveryAttempts < 2 && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          hlsRecoveryAttempts += 1;
+          hls.recoverMediaError();
+        } else {
+          setPlayerWarning("The prepared movie stream could not be loaded. Check the R2 public URL and bucket CORS settings, then reload the room.");
+        }
+      });
+      hls.attachMedia(video);
+    }).catch(() => {
+      if (!cancelled) attachNativeHls();
+    });
+
+    return () => {
+      cancelled = true;
+      if (nativeTrackListener) {
+        video.removeEventListener("loadedmetadata", nativeTrackListener);
+        video.removeEventListener("canplay", nativeTrackListener);
+        video.removeAttribute("src");
+        video.load();
+      }
+      hls?.destroy();
+      if (hlsPlayerRef.current === hls) hlsPlayerRef.current = null;
+    };
+  }, [room?.processing?.status, room?.playback?.mediaUrl, room?.playback?.source]);
+
+  useEffect(() => {
+    if (!movieUrl || !room?.playback || room.playback.source === "hls") return;
     window.setTimeout(() => applyPlayback(room.playback), 150);
   }, [movieUrl, room?.playback?.mediaUrl]);
+
+  useEffect(() => {
+    setSelectedAudioTrack(Number(room?.playback?.audioTrackIndex || 0));
+  }, [room?.playback?.mediaUrl, room?.playback?.audioTrackIndex]);
 
   useEffect(() => {
     function handleFullscreenChange() {
@@ -415,13 +521,6 @@ function App() {
       .catch(() => setNeedsPlaybackGesture(true));
   }
 
-  function canBrowserPlay(file) {
-    const probe = document.createElement("video");
-    const typeOk = file.type && probe.canPlayType(file.type);
-    if (typeOk) return true;
-    return /\.(mp4|m4v|webm|ogv|ogg)$/i.test(file.name);
-  }
-
   function handleMovieMetadata() {
     const player = videoRef.current;
     if (!player) return;
@@ -476,6 +575,26 @@ function App() {
     window.setTimeout(() => {
       syncing.current = false;
     }, 250);
+  }
+
+  function changeAudioTrack(trackIndex, broadcast = true) {
+    const index = Number(trackIndex);
+    if (!Number.isInteger(index) || index < 0) return;
+    const hls = hlsPlayerRef.current;
+    if (hls && index < hls.audioTracks.length) {
+      hls.audioTrack = index;
+    } else {
+      const tracks = videoRef.current?.audioTracks;
+      if (!tracks || index >= tracks.length) return;
+      for (let track = 0; track < tracks.length; track += 1) {
+        tracks[track].enabled = track === index;
+      }
+    }
+    setSelectedAudioTrack(index);
+    const activeRoom = roomRef.current;
+    if (broadcast && activeRoom?.hostId === socket.id && activeRoom.playback?.source === "hls") {
+      socket.emit("audio-track:update", { roomCode: activeRoom.code, trackIndex: index });
+    }
   }
 
   function emitSignal(event, peerId, channel, payload) {
@@ -715,15 +834,6 @@ function App() {
   async function chooseFile(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!canBrowserPlay(file)) {
-      const confirmed = window.confirm(
-        "This file may upload, but browsers often show a blank video for MKV/HEVC/x265 files. MP4 H.264 + AAC is the safest format. Upload anyway?"
-      );
-      if (!confirmed) {
-        event.target.value = "";
-        return;
-      }
-    }
     if (localUrl) URL.revokeObjectURL(localUrl);
     const nextUrl = URL.createObjectURL(file);
     setLocalUrl(nextUrl);
@@ -735,9 +845,11 @@ function App() {
     setScreenStream(null);
     try {
       const playback = await uploadMovie(file);
-      setRoom((current) => current ? { ...current, playback } : current);
-      window.setTimeout(() => videoRef.current?.load(), 50);
-      window.setTimeout(() => applyPlayback(playback), 250);
+      if (playback) {
+        setRoom((current) => current ? { ...current, playback } : current);
+        window.setTimeout(() => videoRef.current?.load(), 50);
+        window.setTimeout(() => applyPlayback(playback), 250);
+      }
     } catch (error) {
       alert(`Movie upload failed: ${error.message}`);
     } finally {
@@ -780,24 +892,17 @@ function App() {
     if (!response.ok) throw new Error(signed.error || "Cloudflare R2 is not configured.");
 
     await uploadFileWithProgress(signed.uploadUrl, file);
-
-    const playback = {
-      paused: true,
-      currentTime: 0,
-      updatedAt: Date.now(),
-      title: file.name,
-      mediaUrl: signed.mediaUrl,
-      pathname: null,
-      r2Key: signed.key,
-      source: "r2"
-    };
-
-    socket.emit("playback:update", {
-      roomCode: room.code,
-      playback
+    return new Promise((resolve, reject) => {
+      socket.timeout(30000).emit("movie:process", {
+        roomCode: room.code,
+        key: signed.key,
+        title: file.name
+      }, (error, result) => {
+        if (error) reject(new Error("Could not start movie preparation. Check that the realtime server has deployed."));
+        else if (result?.error) reject(new Error(result.error));
+        else resolve(null);
+      });
     });
-
-    return playback;
   }
 
   function uploadFileWithProgress(uploadUrl, file) {
@@ -992,7 +1097,22 @@ function App() {
 
       <section className="stage">
         <div className="theater" ref={theaterRef}>
-          {isHost && screenStream ? (
+          {room.processing?.status === "processing" ? (
+            <div className="empty movie-processing">
+              <FileVideo size={46} />
+              <h2>Preparing the movie for playback</h2>
+              <p>{room.processing.title} · {room.processing.progress}%</p>
+              <div className="processing-progress"><span style={{ width: `${room.processing.progress}%` }} /></div>
+              <small>Keeping the video clear and preparing each audio track for browser playback.</small>
+            </div>
+          ) : room.processing?.status === "error" && !room.playback?.mediaUrl ? (
+            <div className="empty movie-processing">
+              <FileVideo size={46} />
+              <h2>Movie preparation failed</h2>
+              <p>{room.processing.error}</p>
+              <small>Upload another copy, or check the Render logs for the FFmpeg error.</small>
+            </div>
+          ) : isHost && screenStream ? (
             <video
               autoPlay
               muted
@@ -1008,7 +1128,8 @@ function App() {
               key={movieUrl}
               ref={videoRef}
               className="movie"
-              src={movieUrl}
+              src={room.playback.source === "hls" ? undefined : movieUrl}
+              crossOrigin={room.playback.source === "hls" ? "anonymous" : undefined}
               controls={!theaterMode}
               playsInline
               webkit-playsinline="true"
@@ -1129,8 +1250,8 @@ function App() {
             {isHost && (
               <label className={`file-button ${localUrl ? "loaded" : ""}`}>
                 {localUrl ? <FileVideo size={18} /> : <Upload size={18} />}
-                {uploading ? `Uploading ${uploadProgress}%` : localUrl ? "Change Movie" : "Upload Movie"}
-                <input type="file" accept="video/mp4,video/webm,video/ogg,.mp4,.m4v,.webm,.ogv,.ogg,.mkv" onChange={chooseFile} />
+                {uploading ? `Uploading ${uploadProgress}%` : room.processing?.status === "processing" ? `Preparing ${room.processing.progress}%` : localUrl ? "Change Movie" : "Upload Movie"}
+                <input type="file" disabled={uploading || room.processing?.status === "processing"} accept="video/mp4,video/webm,video/ogg,.mp4,.m4v,.webm,.ogv,.ogg,.mkv" onChange={chooseFile} />
               </label>
             )}
             {isHost && (
@@ -1174,6 +1295,36 @@ function App() {
               <button onClick={() => publishPlayback()} disabled={!isHost}>Resync</button>
             </div>
             <p>{isHost ? "You are broadcasting the room stream." : "You are watching the host broadcast."}</p>
+          </div>
+
+          <div className="audio-track-card">
+            <h3><Languages size={18} /> Movie audio</h3>
+            {room.processing?.status === "processing" ? (
+              <p>Preparing {room.processing.title} audio tracks...</p>
+            ) : room.processing?.status === "error" ? (
+              <p>Could not prepare the new movie: {room.processing.error} The previous movie, if any, is unchanged.</p>
+            ) : !room.playback?.mediaUrl || room.playback?.source !== "hls" ? (
+              <p>Audio language choices appear here after the movie is prepared.</p>
+            ) : (availableAudioTracks.length ? availableAudioTracks : room.playback.hlsTracks || []).length === 0 ? (
+              <p>No audio tracks were found in this movie.</p>
+            ) : (
+              <>
+                <label htmlFor="movie-audio-track">Language / track</label>
+                <select
+                  id="movie-audio-track"
+                  value={selectedAudioTrack}
+                  disabled={!isHost || !audioTracksReady || (availableAudioTracks.length ? availableAudioTracks : room.playback.hlsTracks || []).length < 2}
+                  onChange={(event) => changeAudioTrack(event.target.value)}
+                >
+                  {(availableAudioTracks.length ? availableAudioTracks : room.playback.hlsTracks || []).map((track, index) => (
+                    <option key={`${track.index ?? index}-${track.language || track.lang || ""}`} value={track.index ?? index}>
+                      {track.label || track.name || track.lang || `Audio ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+                <p>{isHost ? "Your audio choice syncs to the room." : "The host chooses the movie audio for everyone."}</p>
+              </>
+            )}
           </div>
 
           <div className="watch-stats">

@@ -39,7 +39,7 @@ For production, it must be an HTTPS/WSS-capable hosted backend URL, for example:
 https://your-cinemate-server.onrender.com
 ```
 
-## Vercel Blob
+## Existing Vercel Blob Store
 
 You already created the Blob store. Confirm these values:
 
@@ -52,15 +52,17 @@ You already created the Blob store. Confirm these values:
 | Read-write token | enabled |
 
 Vercel should automatically add Blob environment variables to the project.
+The current movie upload flow uses Cloudflare R2; this Blob store is retained for cleanup of any older test uploads.
 
-## Heavy Movie Uploads
+## MKV And Multiple Audio Tracks
 
-The app uses Vercel Blob client uploads in production:
+Production movie uploads go directly from the browser to Cloudflare R2. The Render realtime service downloads each uploaded file, probes its streams with FFprobe, and packages it as HLS with separate audio renditions. The browser uses HLS.js on MSE browsers and native HLS on Safari. The host selects the track; the room synchronizes that choice.
 
-- Files upload directly from the browser to Vercel Blob.
-- Large uploads do not pass through a Vercel Function body.
-- Upload progress is shown in the movie button.
-- After upload, the room syncs the public Blob URL to everyone.
+- H.264 8-bit 4:2:0 video is copied without re-encoding.
+- Other video codecs or pixel formats are converted to H.264 for broad browser playback. This takes longer and changes the video encoding.
+- Audio tracks are converted to AAC so Chrome, Firefox, Edge, and Safari can play them.
+- The source upload is deleted after successful packaging. HLS outputs are deleted when the room ends or becomes empty.
+- R2 single-request uploads are limited to 5GB. Larger files need multipart upload support, which this app does not currently implement.
 
 ## Realtime Server
 
@@ -78,6 +80,8 @@ The server needs:
 pnpm install
 node server/index.js
 ```
+
+Keep the repository's `pnpm-workspace.yaml` build permission for `ffmpeg-static` enabled. Render installs the FFmpeg binary during dependency installation; the Windows ARM64 development machine may not have a bundled FFmpeg binary, so local MKV processing requires FFmpeg on PATH or `FFMPEG_PATH`/`FFPROBE_PATH` set to installed binaries.
 
 Set its port with:
 
@@ -97,6 +101,14 @@ R2_SECRET_ACCESS_KEY=your_r2_secret_access_key
 R2_BUCKET=cinemate-movies
 R2_PUBLIC_URL=https://your-public-r2-bucket-url
 ```
+
+For large movies, attach a paid Render persistent disk to the realtime web service with mount path `/var/data`, then add this Render environment variable:
+
+```bash
+CINEMATE_TMP_DIR=/var/data/cinemate-tmp
+```
+
+Packaging needs temporary room for the downloaded source plus generated HLS output. Budget at least about 2x the movie size, with more headroom for HEVC or other video that needs conversion. Render Free services have ephemeral storage and cannot attach a persistent disk, so they are not suitable for preparing 1GB+ movies reliably.
 
 You can copy the value from Vercel:
 
@@ -143,7 +155,7 @@ https://your-vercel-app.vercel.app/api/r2/status
 
 It should return `"ok": true`. If it lists missing variables, add those variables in Vercel and redeploy again.
 
-Set this CORS policy on the R2 bucket so browser uploads work:
+Set this CORS policy on the R2 bucket so browser uploads and HLS playback work. Origins must not end in `/`:
 
 ```json
 [
@@ -154,7 +166,7 @@ Set this CORS policy on the R2 bucket so browser uploads work:
     ],
     "AllowedMethods": ["GET", "PUT", "HEAD"],
     "AllowedHeaders": ["*"],
-    "ExposeHeaders": ["ETag"],
+    "ExposeHeaders": ["ETag", "Accept-Ranges", "Content-Range", "Content-Length"],
     "MaxAgeSeconds": 3600
   }
 ]
@@ -194,19 +206,9 @@ You can also delete old files from Vercel:
 5. Select the old test files.
 6. Click **Delete**.
 
-## 1GB+ Movie Uploads
+## Large Movie Notes
 
-Use Cloudflare R2 for 1GB+ movie uploads.
-
-Use these rules:
-
-- Prefer `.mp4` with H.264 video and AAC audio.
-- Avoid `.mkv` for now; many browsers cannot play MKV directly.
-- Keep the R2 bucket public for simple browser playback.
-- Use a strong connection before uploading big files.
-- Test with a 50-100MB MP4 before trying a full 1GB+ movie.
-
-Large uploads go directly from the browser to Cloudflare R2 using a temporary signed upload URL, so they do not pass through the Vercel Function body limit.
+R2 uploads bypass Vercel's function body limit, but the Render service still has to package the video after upload. Use a Render disk sized for the temporary working space described above, and leave the movie tab open until the **Preparing** progress finishes. A 1GB movie can take several minutes; a non-H.264 source can take substantially longer.
 
 ## First Production Test
 

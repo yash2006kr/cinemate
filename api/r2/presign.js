@@ -1,6 +1,6 @@
 import { createR2Upload, hasR2Config } from "../../server/r2.js";
 
-const maxUploadBytes = 8 * 1024 * 1024 * 1024;
+const maxUploadBytes = 5 * 1024 * 1024 * 1024;
 
 function safeName(name = "movie.mp4") {
   return name.replace(/[^\w.\-() ]/g, "_").slice(0, 180);
@@ -31,7 +31,7 @@ export default async function handler(request, response) {
     }
 
     if (!Number.isFinite(size) || size <= 0 || size > maxUploadBytes) {
-      response.status(400).json({ error: "Movie must be 8GB or smaller." });
+      response.status(400).json({ error: "Movie must be 5GB or smaller." });
       return;
     }
 

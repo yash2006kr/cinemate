@@ -3,10 +3,11 @@ import multer from "multer";
 import { del } from "@vercel/blob";
 import { createServer } from "node:http";
 import { existsSync, mkdirSync } from "node:fs";
-import { unlink } from "node:fs/promises";
+import { rm, unlink } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { Server } from "socket.io";
-import { deleteR2Object } from "./r2.js";
+import { deleteR2Object, deleteR2Prefix, hasR2Config } from "./r2.js";
+import { packageLocalMovie, packageR2Movie } from "./movie.js";
 
 const app = express();
 const server = createServer(app);
@@ -23,6 +24,7 @@ const rooms = new Map();
 const uploadsDir = join(process.cwd(), "uploads");
 const cleanupTimers = new Map();
 const disconnectTimers = new Map();
+const processingRooms = new Set();
 
 if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 
@@ -42,7 +44,11 @@ const upload = multer({
 app.use("/uploads", express.static(uploadsDir, {
   acceptRanges: true,
   immutable: false,
-  maxAge: 0
+  maxAge: 0,
+  setHeaders: (res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "Accept-Ranges, Content-Range, Content-Length");
+  }
 }));
 
 app.get("/", (req, res) => {
@@ -65,19 +71,35 @@ app.post("/api/rooms/:roomCode/movie", upload.single("movie"), async (req, res) 
     return;
   }
 
-  const mediaUrl = `${req.protocol}://${req.get("host")}/uploads/${req.file.filename}`;
+  const outputFolder = `${roomCode}-${Date.now()}-hls`;
+  const outputDir = join(uploadsDir, outputFolder);
+  let prepared;
+  try {
+    prepared = await packageLocalMovie({
+      inputPath: req.file.path,
+      outputDir,
+      mediaBaseUrl: `${req.protocol}://${req.get("host")}/uploads/${outputFolder}`
+    });
+    await unlink(req.file.path);
+  } catch (error) {
+    await unlink(req.file.path).catch(() => {});
+    await rm(outputDir, { recursive: true, force: true }).catch(() => {});
+    res.status(422).json({ error: error.message || "Could not prepare this movie for browser playback." });
+    return;
+  }
+
   await deleteRoomMovie(room);
   room.playback = {
-    ...room.playback,
-    paused: true,
-    currentTime: 0,
-    updatedAt: Date.now(),
+    ...resetPlayback(),
     title: req.file.originalname,
-    mediaUrl,
-    pathname: null,
-    localPath: req.file.path,
-    source: "upload"
+    mediaUrl: prepared.mediaUrl,
+    localHlsDir: outputDir,
+    hlsTracks: prepared.hlsTracks,
+    audioTrackIndex: prepared.audioTrackIndex,
+    videoEncoded: prepared.encodedVideo,
+    source: "hls"
   };
+  room.processing = null;
 
   io.to(roomCode).emit("movie:ready", room.playback);
   io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
@@ -95,6 +117,7 @@ function roomSnapshot(roomCode) {
     code: roomCode,
     hostId: room.hostId,
     playback: room.playback,
+    processing: room.processing || null,
     people: [...room.people.values()]
   };
 }
@@ -109,6 +132,13 @@ function resetPlayback() {
     pathname: null,
     localPath: null,
     r2Key: null,
+    sourceR2Key: null,
+    r2Prefix: null,
+    localHlsDir: null,
+    hlsTracks: [],
+    audioTrackIndex: 0,
+    videoEncoded: false,
+    processing: null,
     source: null
   };
 }
@@ -133,6 +163,23 @@ async function deleteRoomMovie(room) {
     await deleteR2Object(playback.r2Key).catch((error) => {
       console.warn("R2 cleanup failed:", error.message);
     });
+  }
+  if (playback?.sourceR2Key) {
+    await deleteR2Object(playback.sourceR2Key).catch((error) => {
+      console.warn("Source movie cleanup failed:", error.message);
+    });
+  }
+  if (playback?.r2Prefix) {
+    await deleteR2Prefix(playback.r2Prefix).catch((error) => {
+      console.warn("R2 movie cleanup failed:", error.message);
+    });
+  }
+  if (playback?.localHlsDir) {
+    await rm(playback.localHlsDir, { recursive: true, force: true }).catch(() => {});
+  }
+  if (room?.processingKey) {
+    await deleteR2Object(room.processingKey).catch(() => {});
+    room.processingKey = null;
   }
 }
 
@@ -229,7 +276,9 @@ function ensureRoom(roomCode, hostId) {
       people: new Map(),
       playback: {
         ...resetPlayback()
-      }
+      },
+      processing: null,
+      processingKey: null
     });
   }
   return rooms.get(roomCode);
@@ -311,6 +360,93 @@ io.on("connection", (socket) => {
       deleteRoomMovie({ playback: previousPlayback }).catch(() => {});
     }
     socket.to(roomCode).emit("playback:sync", room.playback);
+    io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+  });
+
+  socket.on("movie:process", async ({ roomCode, key, title }, reply) => {
+    const room = rooms.get(roomCode);
+    const safeTitle = String(title || "Movie").slice(0, 180);
+    const validKey = typeof key === "string" && key.startsWith(`rooms/${roomCode}/`) && !key.includes("..");
+    if (!room || room.hostId !== socket.id || !validKey || !hasR2Config()) {
+      reply?.({ error: "This movie upload could not be authorized or storage is not configured." });
+      return;
+    }
+    if (processingRooms.has(roomCode)) {
+      reply?.({ error: "A movie is already being prepared for this room." });
+      return;
+    }
+
+    processingRooms.add(roomCode);
+    room.processingKey = key;
+    room.processing = { status: "processing", title: safeTitle, progress: 0, error: null };
+    io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+    reply?.({ ok: true });
+
+    const previousPlayback = room.playback;
+    let lastProgress = -1;
+    try {
+      const prepared = await packageR2Movie({
+        roomCode,
+        key,
+        onProgress: (progress) => {
+          const nextProgress = Math.max(0, Math.min(100, progress));
+          if (nextProgress === 100 || nextProgress >= lastProgress + 3) {
+            lastProgress = nextProgress;
+            room.processing = { status: "processing", title: safeTitle, progress: nextProgress, error: null };
+            io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+          }
+        }
+      });
+      if (rooms.get(roomCode) !== room) {
+        await deleteR2Prefix(prepared.r2Prefix);
+        await deleteR2Object(key);
+        return;
+      }
+
+      room.playback = {
+        ...resetPlayback(),
+        title: safeTitle,
+        mediaUrl: prepared.mediaUrl,
+        sourceR2Key: key,
+        r2Prefix: prepared.r2Prefix,
+        hlsTracks: prepared.hlsTracks,
+        audioTrackIndex: prepared.audioTrackIndex,
+        videoEncoded: prepared.encodedVideo,
+        source: "hls"
+      };
+      room.processing = null;
+      try {
+        await deleteR2Object(key);
+        room.playback.sourceR2Key = null;
+      } catch (error) {
+        console.warn("Original movie cleanup failed:", error.message);
+      }
+      room.processingKey = null;
+      io.to(roomCode).emit("movie:ready", room.playback);
+      io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+      deleteRoomMovie({ playback: previousPlayback }).catch((error) => console.warn("Previous movie cleanup failed:", error.message));
+    } catch (error) {
+      await deleteR2Object(key).catch(() => {});
+      room.processingKey = null;
+      room.processing = {
+        status: "error",
+        title: safeTitle,
+        progress: 0,
+        error: error.message || "Could not prepare this movie for browser playback."
+      };
+      io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+    } finally {
+      processingRooms.delete(roomCode);
+    }
+  });
+
+  socket.on("audio-track:update", ({ roomCode, trackIndex }) => {
+    const room = rooms.get(roomCode);
+    const index = Number(trackIndex);
+    if (!room || room.hostId !== socket.id || room.playback.source !== "hls") return;
+    if (!Number.isInteger(index) || index < 0 || index >= (room.playback.hlsTracks || []).length) return;
+    room.playback.audioTrackIndex = index;
+    io.to(roomCode).emit("audio-track:sync", index);
     io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
   });
 
