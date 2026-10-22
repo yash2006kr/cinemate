@@ -109,7 +109,8 @@ function resetPlayback() {
     pathname: null,
     localPath: null,
     r2Key: null,
-    source: null
+    source: null,
+    audioTrackIndex: 0
   };
 }
 
@@ -311,6 +312,15 @@ io.on("connection", (socket) => {
       deleteRoomMovie({ playback: previousPlayback }).catch(() => {});
     }
     socket.to(roomCode).emit("playback:sync", room.playback);
+    io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
+  });
+
+  socket.on("audio-track:update", ({ roomCode, trackIndex }) => {
+    const room = rooms.get(roomCode);
+    const index = Number(trackIndex);
+    if (!room || room.hostId !== socket.id || !Number.isInteger(index) || index < 0 || index > 31) return;
+    room.playback = { ...room.playback, audioTrackIndex: index, updatedAt: Date.now() };
+    io.to(roomCode).emit("audio-track:sync", index);
     io.to(roomCode).emit("room:update", roomSnapshot(roomCode));
   });
 

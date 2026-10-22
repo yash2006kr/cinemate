@@ -10,6 +10,7 @@ import {
   DoorClosed,
   Expand,
   FileVideo,
+  Languages,
   Link,
   LogOut,
   Maximize2,
@@ -140,6 +141,8 @@ function App() {
   const [playerWarning, setPlayerWarning] = useState("");
   const [fullscreenChatHidden, setFullscreenChatHidden] = useState(false);
   const [movieLoadWarning, setMovieLoadWarning] = useState(false);
+  const [audioTrackState, setAudioTrackState] = useState({ status: "loading", tracks: [] });
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState(0);
   const videoRef = useRef(null);
   const remoteMovieRef = useRef(null);
   const theaterRef = useRef(null);
@@ -247,6 +250,9 @@ function App() {
     socket.on("playback:sync", (playback) => {
       applyPlayback(playback);
     });
+    socket.on("audio-track:sync", (trackIndex) => {
+      applyAudioTrackSelection(trackIndex);
+    });
     socket.on("movie:ready", (playback) => {
       setMovieSource(playback.source || "upload");
       setScreenStream(null);
@@ -267,6 +273,7 @@ function App() {
       socket.off("chat:new");
       socket.off("reaction:new");
       socket.off("playback:sync");
+      socket.off("audio-track:sync");
       socket.off("movie:ready");
       socket.off("webrtc:offer");
       socket.off("webrtc:answer");
@@ -447,6 +454,50 @@ function App() {
   function showMovieWarning() {
     setPlayerWarning("This browser could not load the movie video. Try MP4 H.264 + AAC, or use screen share for this file.");
     setMovieLoadWarning(false);
+  }
+
+  function refreshAudioTracks() {
+    const player = videoRef.current;
+    if (!player) return;
+    if (!("audioTracks" in player)) {
+      setAudioTrackState({ status: "unsupported", tracks: [] });
+      return;
+    }
+
+    const tracks = Array.from(player.audioTracks || []).map((track, index) => {
+      let language = track.language || "";
+      try {
+        if (language) language = new Intl.DisplayNames([navigator.language], { type: "language" }).of(language) || language;
+      } catch {}
+      return {
+        index,
+        label: track.label || language || `Audio ${index + 1}`,
+        language: track.language || ""
+      };
+    });
+    setAudioTrackState({ status: "supported", tracks });
+
+    const preferredTrack = Number(roomRef.current?.playback?.audioTrackIndex ?? 0);
+    if (tracks.length && Number.isInteger(preferredTrack) && preferredTrack < tracks.length) {
+      applyAudioTrackSelection(preferredTrack);
+    }
+  }
+
+  function applyAudioTrackSelection(trackIndex, broadcast = false) {
+    const player = videoRef.current;
+    const tracks = player?.audioTracks;
+    const index = Number(trackIndex);
+    if (!tracks || !Number.isInteger(index) || index < 0 || index >= tracks.length) return;
+
+    for (let i = 0; i < tracks.length; i += 1) {
+      tracks[i].enabled = i === index;
+    }
+    setSelectedAudioTrack(index);
+
+    const activeRoom = roomRef.current;
+    if (broadcast && activeRoom?.hostId === socket.id) {
+      socket.emit("audio-track:update", { roomCode: activeRoom.code, trackIndex: index });
+    }
   }
 
   function retryMovieLoad() {
@@ -789,7 +840,8 @@ function App() {
       mediaUrl: signed.mediaUrl,
       pathname: null,
       r2Key: signed.key,
-      source: "r2"
+      source: "r2",
+      audioTrackIndex: 0
     };
 
     socket.emit("playback:update", {
@@ -841,7 +893,8 @@ function App() {
       mediaUrl: blob.url,
       pathname: blob.pathname,
       r2Key: null,
-      source: "blob"
+      source: "blob",
+      audioTrackIndex: 0
     };
 
     socket.emit("playback:update", {
@@ -1015,8 +1068,14 @@ function App() {
               preload="metadata"
               controlsList="nodownload noplaybackrate"
               disablePictureInPicture
-              onLoadedMetadata={handleMovieMetadata}
-              onCanPlay={handleMovieMetadata}
+              onLoadedMetadata={() => {
+                handleMovieMetadata();
+                refreshAudioTracks();
+              }}
+              onCanPlay={() => {
+                handleMovieMetadata();
+                refreshAudioTracks();
+              }}
               onError={handleMovieError}
               onPlaying={() => {
                 setMovieLoadWarning(false);
@@ -1174,6 +1233,33 @@ function App() {
               <button onClick={() => publishPlayback()} disabled={!isHost}>Resync</button>
             </div>
             <p>{isHost ? "You are broadcasting the room stream." : "You are watching the host broadcast."}</p>
+          </div>
+
+          <div className="audio-track-card">
+            <h3><Languages size={18} /> Audio track</h3>
+            {audioTrackState.status === "loading" && <p>Looking for audio tracks...</p>}
+            {audioTrackState.status === "unsupported" && (
+              <p>This browser can’t switch embedded movie audio tracks. Try Safari, or use a version with selectable HLS audio tracks.</p>
+            )}
+            {audioTrackState.status === "supported" && audioTrackState.tracks.length === 0 && (
+              <p>No selectable audio tracks were found in this movie.</p>
+            )}
+            {audioTrackState.status === "supported" && audioTrackState.tracks.length > 0 && (
+              <>
+                <label htmlFor="movie-audio-track">Movie language</label>
+                <select
+                  id="movie-audio-track"
+                  value={selectedAudioTrack}
+                  disabled={!isHost || audioTrackState.tracks.length < 2}
+                  onChange={(event) => applyAudioTrackSelection(event.target.value, true)}
+                >
+                  {audioTrackState.tracks.map((track) => (
+                    <option key={`${track.index}-${track.language}`} value={track.index}>{track.label}</option>
+                  ))}
+                </select>
+                <p>{isHost ? "Your selection syncs to everyone." : "The host controls the movie’s audio track."}</p>
+              </>
+            )}
           </div>
 
           <div className="watch-stats">
