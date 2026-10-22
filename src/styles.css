@@ -521,7 +521,6 @@ input {
 
 .toolbar,
 .sync-card,
-.audio-track-card,
 .people,
 .reactions,
 .chat {
@@ -576,7 +575,6 @@ input {
 }
 
 .sync-card,
-.audio-track-card,
 .people {
   padding: 16px;
 }
@@ -599,34 +597,6 @@ h3 {
   margin: 12px 0 0;
   color: #94a3b8;
   font-size: 13px;
-}
-
-.audio-track-card p {
-  margin: 10px 0 0;
-  color: #94a3b8;
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.audio-track-card label {
-  display: block;
-  color: #cbd5e1;
-  font-size: 13px;
-}
-
-.audio-track-card select {
-  width: 100%;
-  margin-top: 8px;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 8px;
-  background: #12151c;
-  color: #f8fafc;
-  font: inherit;
-}
-
-.audio-track-card select:disabled {
-  opacity: 0.7;
 }
 
 .watch-stats {
