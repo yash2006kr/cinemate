@@ -6,7 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { rm, unlink } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { Server } from "socket.io";
-import { deleteR2Object, deleteR2Prefix, hasR2Config } from "./r2.js";
+import { deleteR2Object, deleteR2Prefix, hasR2Config, missingR2Config } from "./r2.js";
 import { packageLocalMovie, packageR2Movie } from "./movie.js";
 
 const app = express();
@@ -367,8 +367,21 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomCode);
     const safeTitle = String(title || "Movie").slice(0, 180);
     const validKey = typeof key === "string" && key.startsWith(`rooms/${roomCode}/`) && !key.includes("..");
-    if (!room || room.hostId !== socket.id || !validKey || !hasR2Config()) {
-      reply?.({ error: "This movie upload could not be authorized or storage is not configured." });
+    if (!room) {
+      reply?.({ error: "This room is no longer active. Recreate the room and upload the movie again." });
+      return;
+    }
+    if (room.hostId !== socket.id) {
+      reply?.({ error: "Only the current room host can prepare a movie." });
+      return;
+    }
+    if (!validKey) {
+      reply?.({ error: "The uploaded movie key does not match this room. Refresh the room and try again." });
+      return;
+    }
+    const missingConfig = missingR2Config();
+    if (missingConfig.length) {
+      reply?.({ error: `Render is missing these R2 environment variables: ${missingConfig.join(", ")}. Add them to the realtime service and redeploy it.` });
       return;
     }
     if (processingRooms.has(roomCode)) {

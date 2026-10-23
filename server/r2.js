@@ -12,15 +12,20 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 
 const uploadExpirySeconds = 60 * 60;
+const requiredR2Config = [
+  "R2_ACCOUNT_ID",
+  "R2_ACCESS_KEY_ID",
+  "R2_SECRET_ACCESS_KEY",
+  "R2_BUCKET",
+  "R2_PUBLIC_URL"
+];
+
+export function missingR2Config() {
+  return requiredR2Config.filter((name) => !process.env[name]);
+}
 
 export function hasR2Config() {
-  return Boolean(
-    process.env.R2_ACCOUNT_ID &&
-    process.env.R2_ACCESS_KEY_ID &&
-    process.env.R2_SECRET_ACCESS_KEY &&
-    process.env.R2_BUCKET &&
-    process.env.R2_PUBLIC_URL
-  );
+  return missingR2Config().length === 0;
 }
 
 function r2Client() {
