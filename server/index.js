@@ -10,6 +10,18 @@ import { deleteR2Object, deleteR2Prefix, hasR2Config, missingR2Config } from "./
 import { packageLocalMovie, packageR2Movie } from "./movie.js";
 
 const app = express();
+
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") {
+    res.sendStatus(204);
+    return;
+  }
+  next();
+});
+
 const server = createServer(app);
 const io = new Server(server, {
   cors: {

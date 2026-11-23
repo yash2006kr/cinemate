@@ -952,20 +952,65 @@ function App() {
   }
 
   async function uploadMovie(file) {
-    if (isLocalhost) return uploadToLocalServer(file);
-    return uploadToR2(file);
+    if (isLocalhost) {
+      return uploadToLocalServer(file);
+    }
+
+    // Try Cloudflare R2 first
+    try {
+      return await uploadToR2(file);
+    } catch (r2Error) {
+      console.warn("Cloudflare R2 pipeline failed or unconfigured, attempting fallbacks:", r2Error.message);
+
+      // Fallback 1: Vercel Blob
+      try {
+        setUploadProgress(0);
+        return await uploadToVercelBlob(file);
+      } catch (blobError) {
+        console.warn("Vercel Blob upload failed, attempting direct server upload:", blobError.message);
+      }
+
+      // Fallback 2: Direct Realtime Server upload
+      try {
+        setUploadProgress(0);
+        return await uploadToLocalServer(file);
+      } catch (serverError) {
+        console.warn("Direct server upload failed:", serverError.message);
+      }
+
+      throw r2Error;
+    }
   }
 
-  async function uploadToLocalServer(file) {
-    const body = new FormData();
-    body.append("movie", file);
-    const response = await fetch(`${serverUrl}/api/rooms/${room.code}/movie`, {
-      method: "POST",
-      body
+  function uploadToLocalServer(file) {
+    return new Promise((resolve, reject) => {
+      const body = new FormData();
+      body.append("movie", file);
+      const request = new XMLHttpRequest();
+      request.open("POST", `${serverUrl}/api/rooms/${room.code}/movie`);
+      request.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        setUploadProgress(Math.round((event.loaded / event.total) * 100));
+      };
+      request.onload = () => {
+        if (request.status >= 200 && request.status < 300) {
+          try {
+            resolve(JSON.parse(request.responseText));
+          } catch {
+            resolve(null);
+          }
+        } else {
+          try {
+            const parsed = JSON.parse(request.responseText);
+            reject(new Error(parsed.error || `Server upload failed (${request.status})`));
+          } catch {
+            reject(new Error(`Server upload failed with status ${request.status}`));
+          }
+        }
+      };
+      request.onerror = () => reject(new Error("Could not connect to the realtime server for upload."));
+      request.send(body);
     });
-    if (!response.ok) throw new Error("Upload failed");
-    const playback = await response.json();
-    return playback;
   }
 
   async function uploadToR2(file) {
