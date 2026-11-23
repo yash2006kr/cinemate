@@ -14,6 +14,7 @@ import {
   Languages,
   LogOut,
   Maximize2,
+  Minimize2,
   MessageCircle,
   Mic,
   MicOff,
@@ -66,6 +67,73 @@ const rtcConfig = {
   ],
   iceCandidatePoolSize: 4
 };
+
+function getFullscreenElement() {
+  return (
+    document.fullscreenElement ||
+    document.webkitFullscreenElement ||
+    document.mozFullScreenElement ||
+    document.msFullscreenElement ||
+    null
+  );
+}
+
+async function requestElementFullscreen(element) {
+  if (!element) return false;
+  try {
+    if (element.requestFullscreen) {
+      await element.requestFullscreen();
+      return true;
+    }
+    if (element.webkitRequestFullscreen) {
+      await element.webkitRequestFullscreen();
+      return true;
+    }
+    if (element.webkitRequestFullScreen) {
+      await element.webkitRequestFullScreen();
+      return true;
+    }
+    if (element.mozRequestFullScreen) {
+      await element.mozRequestFullScreen();
+      return true;
+    }
+    if (element.msRequestFullscreen) {
+      await element.msRequestFullscreen();
+      return true;
+    }
+  } catch (error) {
+    console.warn("requestFullscreen failed or was rejected:", error);
+  }
+  return false;
+}
+
+async function exitElementFullscreen() {
+  try {
+    if (document.exitFullscreen) {
+      await document.exitFullscreen();
+      return true;
+    }
+    if (document.webkitExitFullscreen) {
+      await document.webkitExitFullscreen();
+      return true;
+    }
+    if (document.webkitCancelFullScreen) {
+      await document.webkitCancelFullScreen();
+      return true;
+    }
+    if (document.mozCancelFullScreen) {
+      await document.mozCancelFullScreen();
+      return true;
+    }
+    if (document.msExitFullscreen) {
+      await document.msExitFullscreen();
+      return true;
+    }
+  } catch (error) {
+    console.warn("exitFullscreen failed:", error);
+  }
+  return false;
+}
 
 function syncTime(playback) {
   if (playback.paused) return playback.currentTime;
@@ -394,15 +462,39 @@ function App() {
 
   useEffect(() => {
     function handleFullscreenChange() {
-      setTheaterMode(document.fullscreenElement === theaterRef.current);
+      const fsElement = getFullscreenElement();
+      if (fsElement) {
+        setTheaterMode(fsElement === theaterRef.current || (videoRef.current && fsElement === videoRef.current));
+      } else {
+        setTheaterMode(false);
+      }
     }
 
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    const fsEvents = ["fullscreenchange", "webkitfullscreenchange", "mozfullscreenchange", "MSFullscreenChange"];
+    fsEvents.forEach((evt) => document.addEventListener(evt, handleFullscreenChange));
+    return () => {
+      fsEvents.forEach((evt) => document.removeEventListener(evt, handleFullscreenChange));
+    };
   }, []);
 
   useEffect(() => {
+    if (theaterMode) {
+      document.body.classList.add("has-theater-fullscreen");
+    } else {
+      document.body.classList.remove("has-theater-fullscreen");
+    }
+    return () => {
+      document.body.classList.remove("has-theater-fullscreen");
+    };
+  }, [theaterMode]);
+
+  useEffect(() => {
     function handleHotkeys(event) {
+      if (event.key === "Escape" && theaterMode) {
+        event.preventDefault();
+        toggleFullscreen();
+        return;
+      }
       const tagName = document.activeElement?.tagName?.toLowerCase();
       const isTyping = ["input", "textarea", "select"].includes(tagName) || document.activeElement?.isContentEditable;
       if (isTyping || event.ctrlKey || event.metaKey || event.altKey || !roomRef.current) return;
@@ -420,7 +512,7 @@ function App() {
 
     window.addEventListener("keydown", handleHotkeys, true);
     return () => window.removeEventListener("keydown", handleHotkeys, true);
-  }, []);
+  }, [theaterMode]);
 
   function rememberName() {
     const clean = name.trim() || "Movie Buddy";
@@ -994,12 +1086,33 @@ function App() {
   }
 
   async function toggleFullscreen() {
-    if (!document.fullscreenElement) {
-      await theaterRef.current?.requestFullscreen();
-      setTheaterMode(true);
-    } else {
-      await document.exitFullscreen();
+    const fsElement = getFullscreenElement();
+    const isCurrentlyFullscreen = Boolean(fsElement) || theaterMode;
+
+    if (isCurrentlyFullscreen) {
+      if (fsElement) {
+        await exitElementFullscreen();
+      }
       setTheaterMode(false);
+      try {
+        if (screen.orientation?.unlock) {
+          screen.orientation.unlock();
+        }
+      } catch {
+        // ignore orientation unlock errors
+      }
+    } else {
+      if (theaterRef.current) {
+        await requestElementFullscreen(theaterRef.current);
+      }
+      setTheaterMode(true);
+      try {
+        if (screen.orientation?.lock) {
+          screen.orientation.lock("landscape").catch(() => {});
+        }
+      } catch {
+        // ignore orientation lock errors
+      }
     }
   }
 
@@ -1096,7 +1209,7 @@ function App() {
       </header>
 
       <section className="stage">
-        <div className="theater" ref={theaterRef}>
+        <div className={`theater ${theaterMode ? "is-fullscreen" : ""}`} ref={theaterRef}>
           {room.processing?.status === "processing" ? (
             <div className="empty movie-processing">
               <FileVideo size={46} />
@@ -1172,8 +1285,8 @@ function App() {
             <button onClick={() => jump(-10)} title="Back 10 seconds">
               <RotateCcw size={18} />
             </button>
-            <button onClick={toggleFullscreen} title="Fullscreen">
-              <Expand size={18} />
+            <button onClick={toggleFullscreen} title={theaterMode ? "Exit Fullscreen" : "Fullscreen"}>
+              {theaterMode ? <Minimize2 size={18} /> : <Expand size={18} />}
             </button>
             <button onClick={() => jump(10)} title="Forward 10 seconds">
               <RotateCw size={18} />
@@ -1268,8 +1381,12 @@ function App() {
             <button onClick={restartCallLayer} title="Reconnect voice/video">
               <RefreshCw size={18} />
             </button>
-            <button onClick={toggleFullscreen} title="Fullscreen">
-              <Maximize2 size={18} />
+            <button
+              className={theaterMode ? "active" : ""}
+              onClick={toggleFullscreen}
+              title={theaterMode ? "Exit Fullscreen" : "Fullscreen"}
+            >
+              {theaterMode ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
             </button>
             {isHost && (
               <button className="danger" onClick={endRoom} title="End room and delete movie">

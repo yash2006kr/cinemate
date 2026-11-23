@@ -239,13 +239,47 @@ input {
 .theater:fullscreen {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   border: 0;
   border-radius: 0;
   background: #000000;
 }
 
-.theater:fullscreen .movie {
+.theater:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  border: 0;
+  border-radius: 0;
+  background: #000000;
+}
+
+.theater.is-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 99999;
+  border: 0;
+  border-radius: 0;
+  background: #000000;
+  margin: 0;
+}
+
+.theater:fullscreen .movie,
+.theater:-webkit-full-screen .movie,
+.theater.is-fullscreen .movie {
   min-height: 100vh;
+  min-height: 100dvh;
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
+}
+
+body.has-theater-fullscreen {
+  overflow: hidden !important;
+  touch-action: none;
 }
 
 .movie {
@@ -367,15 +401,17 @@ input {
   position: absolute;
   right: 14px;
   bottom: 14px;
+  z-index: 10;
   display: flex;
   gap: 6px;
   padding: 6px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.28);
+  background: rgba(0, 0, 0, 0.38);
   backdrop-filter: blur(18px);
-  opacity: 0.78;
+  opacity: 0.85;
   transition: opacity 160ms ease;
+  touch-action: manipulation;
 }
 
 .hud:hover,
@@ -386,11 +422,17 @@ input {
 .hud button {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.09);
   color: #ffffff;
+  cursor: pointer;
+}
+
+.hud button:active {
+  transform: scale(0.95);
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .theater-chat-toggle {
@@ -468,6 +510,8 @@ input {
 }
 
 .theater:fullscreen .theater-chat-form,
+.theater:-webkit-full-screen .theater-chat-form,
+.theater.is-fullscreen .theater-chat-form,
 .cinema-focus .theater-chat-form {
   display: grid;
 }
@@ -880,17 +924,58 @@ h3 {
   }
 
   .toolbar {
-    grid-template-columns: 1fr repeat(6, 42px);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
-  .theater,
+  .toolbar .file-button {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .toolbar button {
+    flex: 1 1 calc(16% - 8px);
+    min-width: 42px;
+    height: 42px;
+  }
+
+  .toolbar.viewer-tools {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+  }
+
+  .theater:not(.is-fullscreen),
   .movie,
   .empty {
     min-height: auto;
   }
 
-  .theater {
+  .theater:not(.is-fullscreen) {
     aspect-ratio: 16 / 9;
+  }
+
+  .theater.is-fullscreen {
+    aspect-ratio: auto;
+    width: 100vw;
+    height: 100dvh;
+  }
+
+  /* When inline on mobile with native controls, reposition HUD to top-right to avoid overlap with native video bar */
+  .theater:not(.is-fullscreen) .hud {
+    bottom: auto;
+    top: 10px;
+    right: 10px;
+  }
+
+  .theater.is-fullscreen .hud {
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    right: calc(14px + env(safe-area-inset-right, 0px));
+  }
+
+  .theater.is-fullscreen .theater-chat-toggle {
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    left: calc(14px + env(safe-area-inset-left, 0px));
   }
 
   .movie {
